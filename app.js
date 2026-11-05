@@ -1,6 +1,7 @@
 'use strict';
 
-const STORAGE_KEY = 'trilha-concursos-data-v1';
+const STORAGE_KEY = 'studymaximizer-data-v1';
+const LEGACY_STORAGE_KEY = 'trilha-concursos-data-v1';
 const SUBJECTS = [
   'Português',
   'Raciocínio Lógico e Matemática',
@@ -161,11 +162,11 @@ const BASE_SCHEDULE = [
 ];
 
 const LEVELS = [
-  { min: 0, name: 'Preguiça em movimento', emoji: '🦥', description: 'Toda trajetória começa com o primeiro passo.' },
-  { min: 150, name: 'Raposa estratégica', emoji: '🦊', description: 'Você está encontrando método e aprendendo a estudar melhor.' },
-  { min: 400, name: 'Leão persistente', emoji: '🦁', description: 'A constância está se transformando em força.' },
-  { min: 750, name: 'Vulcão imparável', emoji: '🌋', description: 'Sua dedicação está ganhando intensidade e consistência.' },
-  { min: 1200, name: 'Águia de elite', emoji: '🦅', description: 'Visão estratégica, disciplina e evolução contínua.' }
+  { min: 0, name: 'Preguiça em movimento', emoji: '🦥', description: 'Comece no seu ritmo e crie uma rotina sustentável.' },
+  { min: 500, name: 'Raposa estratégica', emoji: '🦊', description: 'Você está transformando intenção em método e regularidade.' },
+  { min: 1500, name: 'Leão persistente', emoji: '🦁', description: 'A consistência e o trabalho acumulado estão ficando visíveis.' },
+  { min: 3000, name: 'Vulcão imparável', emoji: '🌋', description: 'Você mantém ritmo, aprende com os resultados e avança com força.' },
+  { min: 5000, name: 'Águia de elite', emoji: '🦅', description: 'Uma jornada construída com consistência, estratégia e evolução.' }
 ];
 
 const VIEW_LABELS = {
@@ -185,7 +186,7 @@ function emptyState() {
 
 function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return emptyState();
     const parsed = JSON.parse(raw);
     return {
@@ -305,18 +306,121 @@ function roleProgress(role) {
   return { groups, total, done, doing, percent: total ? Math.round(done / total * 100) : 0 };
 }
 
-function getXP() {
-  return Object.values(state.completed).filter(Boolean).length * 10;
+function recordedStudyDates(weekStart, weekEnd) {
+  const startKey = localDateKey(weekStart);
+  const endKey = localDateKey(weekEnd);
+  const dates = new Set();
+  state.sessions.forEach(session => {
+    if (session.date >= startKey && session.date <= endKey) dates.add(session.date);
+  });
+  Object.entries(state.completed).forEach(([key, done]) => {
+    if (!done) return;
+    const dateKey = key.split('::')[0];
+    if (dateKey >= startKey && dateKey <= endKey) dates.add(dateKey);
+  });
+  return dates;
 }
 
-function currentLevel() {
-  const xp = getXP();
+function weeklyXP(weekStart, previousAccuracy = null) {
+  const metrics = weekMetrics(weekStart);
+  const dates = recordedStudyDates(weekStart, addDays(weekStart, 6));
+  const hoursRatio = metrics.minutes / 900;
+  const timeXP = Math.floor(metrics.minutes / 30) * 5;
+  const taskXP = metrics.completed * 5;
+  const frequencyXP = dates.size * 10;
+  const questionXP = Math.min(15, Math.floor(metrics.questions / 10));
+  const goalXP = hoursRatio >= 1 ? 60 : hoursRatio >= 0.8 ? 35 : hoursRatio >= 0.5 ? 15 : 0;
+  const currentAccuracy = metrics.questions >= 10 ? metrics.accuracy : null;
+  let learningXP = 0;
+  if (currentAccuracy !== null && previousAccuracy !== null) {
+    const delta = currentAccuracy - previousAccuracy;
+    if (delta >= 5) learningXP = 20;
+    else if (delta >= 2) learningXP = 10;
+  }
+  return {
+    total: timeXP + taskXP + frequencyXP + questionXP + goalXP + learningXP,
+    timeXP, taskXP, frequencyXP, questionXP, goalXP, learningXP,
+    minutes: metrics.minutes, completed: metrics.completed, questions: metrics.questions,
+    activeDays: dates.size, accuracy: currentAccuracy
+  };
+}
+
+function allWeeksWithRecords() {
+  const starts = new Map();
+  const addDate = dateKey => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey || '')) return;
+    const weekStart = startOfWeek(parseDateKey(dateKey));
+    const key = localDateKey(weekStart);
+    starts.set(key, weekStart);
+  };
+  state.sessions.forEach(session => addDate(session.date));
+  Object.keys(state.completed).forEach(taskKey => addDate(taskKey.split('::')[0]));
+  const currentStart = startOfWeek(new Date());
+  starts.set(localDateKey(currentStart), currentStart);
+  return [...starts.values()].sort((a, b) => a - b);
+}
+
+function getGamification() {
+  const weeks = allWeeksWithRecords();
+  let xp = 0;
+  let previousAccuracy = null;
+  const weekScores = new Map();
+  weeks.forEach(weekStart => {
+    const result = weeklyXP(weekStart, previousAccuracy);
+    xp += result.total;
+    weekScores.set(localDateKey(weekStart), result);
+    if (result.accuracy !== null) previousAccuracy = result.accuracy;
+  });
+  const doneTopics = Object.values(state.topicStatus).filter(status => status === 'done').length;
+  const doingTopics = Object.values(state.topicStatus).filter(status => status === 'doing').length;
+  const topicXP = doneTopics * 20 + doingTopics * 5;
+  xp += topicXP;
+  const currentStart = startOfWeek(new Date());
+  const thisWeek = weekScores.get(localDateKey(currentStart)) || weeklyXP(currentStart);
   let index = 0;
   LEVELS.forEach((level, i) => { if (xp >= level.min) index = i; });
   const current = LEVELS[index];
   const next = LEVELS[index + 1] || null;
   const progress = next ? Math.min(100, Math.max(0, (xp - current.min) / (next.min - current.min) * 100)) : 100;
-  return { xp, index, current, next, progress, remaining: next ? Math.max(0, next.min - xp) : 0 };
+  return { xp, index, current, next, progress, remaining: next ? Math.max(0, next.min - xp) : 0, thisWeek, topicXP };
+}
+
+function currentStudyRhythm() {
+  const today = new Date();
+  const todayKey = localDateKey(today);
+  const weekStart = startOfWeek(today);
+  const weekdayNumber = today.getDay() === 0 ? 7 : today.getDay();
+  const yesterday = addDays(today, -1);
+  const tasks = allTasksForWeek(weekStart).filter(task => task.dateKey < todayKey);
+  const expectedMinutes = tasks.reduce((sum, task) => sum + task.minutes, 0);
+  const completedTasks = tasks.filter(task => state.completed[task.key]).length;
+  const sessions = sessionsInRange(weekStart, yesterday);
+  const minutes = sessions.reduce((sum, session) => sum + (Number(session.minutes) || 0), 0);
+  const activeDates = recordedStudyDates(weekStart, yesterday);
+  const passedPlannedDays = BASE_SCHEDULE.filter(day => day.day < weekdayNumber).length;
+  const timePct = expectedMinutes ? Math.min(100, minutes / expectedMinutes * 100) : null;
+  const taskPct = tasks.length ? completedTasks / tasks.length * 100 : null;
+  const frequencyPct = passedPlannedDays ? Math.min(100, activeDates.size / passedPlannedDays * 100) : null;
+  const components = [
+    { value: timePct, weight: 0.45 },
+    { value: taskPct, weight: 0.35 },
+    { value: frequencyPct, weight: 0.20 }
+  ].filter(item => item.value !== null);
+  const totalWeight = components.reduce((sum, item) => sum + item.weight, 0);
+  const score = components.length ? components.reduce((sum, item) => sum + item.value * item.weight, 0) / totalWeight : null;
+  const currentWeekDates = recordedStudyDates(weekStart, addDays(weekStart, 6));
+  return {
+    score: score === null ? null : Math.round(score),
+    activeDays: Math.min(6, currentWeekDates.size),
+    frequencyPct: Math.round(Math.min(100, currentWeekDates.size / 6 * 100)),
+    passedPlannedDays, expectedMinutes, minutes, completedTasks, taskCount: tasks.length,
+    timePct, taskPct
+  };
+}
+
+function currentLevel() {
+  const game = getGamification();
+  return game;
 }
 
 function setTheme(theme) {
@@ -416,17 +520,41 @@ function renderOverview() {
   document.getElementById('chartAverage').textContent = chartInfo.average === null ? '—' : `${Math.round(chartInfo.average)}%`;
 
   const level = currentLevel();
+  const rhythm = currentStudyRhythm();
   document.getElementById('levelEmoji').textContent = level.current.emoji;
   document.getElementById('levelName').textContent = level.current.name;
   document.getElementById('levelDescription').textContent = level.current.description;
-  document.getElementById('xpValue').textContent = `${level.xp} XP`;
-  document.getElementById('nextLevelText').textContent = level.next ? `${level.remaining} XP para o próximo nível` : 'Nível máximo alcançado';
+  document.getElementById('xpValue').textContent = `${level.xp.toLocaleString('pt-BR')} XP`;
+  document.getElementById('nextLevelText').textContent = level.next ? `${level.remaining.toLocaleString('pt-BR')} XP para o próximo nível` : 'Nível máximo alcançado';
   document.getElementById('xpProgress').style.width = `${level.progress}%`;
-  document.getElementById('levelNext').textContent = level.next ? `Próximo nível: ${level.next.name} ${level.next.emoji}` : 'Você chegou ao topo da trilha.';
+  document.getElementById('levelNext').textContent = level.next ? `Próximo nível: ${level.next.name} ${level.next.emoji}` : 'Você chegou ao topo da jornada.';
   document.querySelectorAll('[data-level-step]').forEach((step, index) => {
     step.classList.toggle('reached', index < level.index);
     step.classList.toggle('active', index === level.index);
   });
+
+  const paceValue = document.getElementById('paceValue');
+  const paceProgress = document.getElementById('paceProgress');
+  const paceHint = document.getElementById('paceHint');
+  paceValue.textContent = rhythm.score === null ? '—' : `${rhythm.score}%`;
+  paceProgress.style.width = `${rhythm.score ?? 0}%`;
+  if (rhythm.score === null) {
+    paceHint.textContent = 'A comparação começa após o primeiro dia planejado.';
+  } else if (rhythm.score >= 90) {
+    paceHint.textContent = 'No ritmo esperado ou acima dele. Continue com qualidade.';
+  } else if (rhythm.score >= 70) {
+    paceHint.textContent = 'Bom ritmo. Ajustes pequenos podem aproximar você da meta.';
+  } else {
+    paceHint.textContent = 'Há diferença para o plano. Veja qual parte ficou para trás e retome sem tentar compensar tudo de uma vez.';
+  }
+  document.getElementById('frequencyValue').textContent = `${rhythm.activeDays}/6 dias`;
+  document.getElementById('frequencyProgress').style.width = `${rhythm.frequencyPct}%`;
+  document.getElementById('frequencyHint').textContent = 'Conta um dia com sessão registrada ou tarefa concluída. Referência: 6 dias planejados na semana.';
+  document.getElementById('weeklyXpValue').textContent = `+${level.thisWeek.total.toLocaleString('pt-BR')} XP`;
+  const bonusBits = [];
+  if (level.thisWeek.goalXP) bonusBits.push(`meta de horas: +${level.thisWeek.goalXP}`);
+  if (level.thisWeek.learningXP) bonusBits.push(`evolução nos acertos: +${level.thisWeek.learningXP}`);
+  document.getElementById('weeklyXpHint').textContent = bonusBits.length ? `Bônus incluídos — ${bonusBits.join(' · ')} XP.` : 'XP por tempo, atividades e frequência; bônus de meta quando o ritmo semanal avançar.';
 
   const today = new Date();
   const dayNumber = today.getDay() === 0 ? 7 : today.getDay();
@@ -617,7 +745,7 @@ function completeTask(key) {
     showToast('Atividade reaberta.');
   } else {
     state.completed[key] = true;
-    showToast('Atividade concluída · +10 XP');
+    showToast('Atividade concluída. XP recalculado pelo seu progresso.');
   }
   saveState();
   renderAll();
@@ -634,12 +762,12 @@ function deleteSession(id) {
 }
 
 function exportBackup() {
-  const payload = { ...state, exportedAt: new Date().toISOString(), app: 'Trilha — Preparação para Concursos' };
+  const payload = { ...state, exportedAt: new Date().toISOString(), app: 'StudyMaximizer — Preparação para Concursos' };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `trilha-backup-${localDateKey(new Date())}.json`;
+  link.download = `studymaximizer-backup-${localDateKey(new Date())}.json`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -751,7 +879,7 @@ function bindEvents() {
     saveState();
     closeSessionModal();
     renderAll();
-    showToast(taskKey ? 'Sessão registrada e atividade concluída · +10 XP' : 'Sessão registrada com sucesso.');
+    showToast(taskKey ? 'Sessão registrada e atividade concluída. XP recalculado.' : 'Sessão registrada com sucesso.');
   });
 
   document.querySelectorAll('[data-set-theme]').forEach(button => button.addEventListener('click', () => setTheme(button.dataset.setTheme)));

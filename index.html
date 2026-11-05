@@ -4,18 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f5f6f8">
-  <meta name="description" content="Painel pessoal de preparação para concursos: cronograma, progresso, desempenho e gamificação.">
-  <title>Trilha — Preparação para Concursos</title>
+  <meta name="description" content="StudyMaximizer: painel de preparação para concursos com cronograma, evolução, desempenho e gamificação baseada em consistência.">
+  <title>StudyMaximizer — Preparação para Concursos</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="brand-lockup">
-        <div class="brand-mark">t<span>.</span></div>
+        <div class="brand-mark">S<span>+</span></div>
         <div>
-          <div class="brand-name">trilha</div>
-          <div class="brand-caption">PREPARAÇÃO 2027</div>
+          <div class="brand-name">StudyMaximizer</div>
+          <div class="brand-caption">PLANEJAR · ESTUDAR · EVOLUIR</div>
         </div>
       </div>
 
@@ -117,7 +117,21 @@
                 <div class="level-step" data-level-step="4"><span>🦅</span><small>Águia</small></div>
               </div>
               <div class="level-divider"></div>
-              <div class="level-tip"><span>✧</span><p>XP é conquistado ao concluir atividades do cronograma. Descanso também faz parte da preparação.</p></div>
+              <div class="journey-metrics">
+                <div class="journey-metric">
+                  <div class="journey-metric-head"><span>RITMO VS. ESPERADO</span><strong id="paceValue">—</strong></div>
+                  <div class="progress-track"><div class="progress-fill progress-sage" id="paceProgress" style="width:0%"></div></div>
+                  <small id="paceHint">O ritmo será calculado após o primeiro dia planejado.</small>
+                </div>
+                <div class="journey-metric">
+                  <div class="journey-metric-head"><span>FREQUÊNCIA NA SEMANA</span><strong id="frequencyValue">0/6 dias</strong></div>
+                  <div class="progress-track"><div class="progress-fill progress-ink" id="frequencyProgress" style="width:0%"></div></div>
+                  <small id="frequencyHint">Meta: manter contato com os estudos em até 6 dias planejados.</small>
+                </div>
+                <div class="journey-metric journey-week-xp"><div><span>XP GERADOS NESTA SEMANA</span><strong id="weeklyXpValue">+0 XP</strong></div><small id="weeklyXpHint">Registre suas sessões para acompanhar a evolução.</small></div>
+              </div>
+              <div class="level-divider"></div>
+              <div class="level-tip"><span>✧</span><p>Seu nível considera tempo registrado, atividades concluídas, frequência, metas semanais e evolução nos resultados. Descanso não reduz XP.</p></div>
               <button class="text-button level-all" data-navigate="performance">Ver minha jornada <span>→</span></button>
             </article>
           </div>
@@ -180,7 +194,7 @@
           <div class="privacy-note"><span>🔒</span><p><strong>Privacidade:</strong> este projeto não envia seus registros para nenhum servidor. Os dados permanecem no armazenamento local do navegador utilizado.</p></div>
         </section>
       </div>
-      <footer class="app-footer"><span>TRILHA <i>·</i> UM PASSO DE CADA VEZ</span><span>Feito para acompanhar sua evolução.</span></footer>
+      <footer class="app-footer"><span>STUDYMAXIMIZER <i>·</i> EVOLUÇÃO COM INTENÇÃO</span><span>Feito para acompanhar sua evolução.</span></footer>
     </main>
   </div>
 
