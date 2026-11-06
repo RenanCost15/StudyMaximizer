@@ -955,3 +955,56 @@ body { font-size: 16px; line-height: 1.6; }
   .cloud-account-actions { flex-direction:column; }
   .cloud-account-actions .button { width:100%; justify-content:center; }
 }
+
+/* Locale and appearance controls shared by sign-in, startup and the main application. */
+.app-shell[data-theme="dark"],
+.auth-screen[data-theme="dark"],
+.cloud-startup-screen[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111520;
+  --panel: #191f2d;
+  --panel-2: #202737;
+  --sidebar: #151a26;
+  --text: #edf1fa;
+  --text-2: #cad3e5;
+  --muted: #9da9bd;
+  --muted-2: #77839a;
+  --border: #2a3447;
+  --border-strong: #38445b;
+  --accent: #9aa8ff;
+  --accent-hover: #b4beff;
+  --accent-soft: #262e50;
+  --accent-contrast: #151a26;
+  --green: #65d3b1;
+  --green-soft: #1d3c37;
+  --teal: #62d1d4;
+  --teal-soft: #1d3d43;
+  --violet: #b7a2ff;
+  --violet-soft: #30294a;
+  --amber: #e4b86c;
+  --amber-soft: #423722;
+  --rose: #f2a0b5;
+  --rose-soft: #422b37;
+  --input-bg: #151b28;
+  --subtle-bg: #202737;
+  --shadow: 0 12px 34px rgba(0, 0, 0, .16);
+}
+.auth-utility-controls { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:9px; margin:0 0 22px; }
+.auth-utility-select, .locale-control { display:inline-flex; align-items:center; gap:7px; min-height:36px; padding:0 10px; border:1px solid var(--border); border-radius:10px; color:var(--muted); background:var(--panel-2); }
+.auth-utility-select select, .locale-control select { max-width:160px; border:0; outline:0; color:var(--text); background:transparent; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }
+.auth-utility-select select option, .locale-control select option { color:#192238; background:#fff; }
+.auth-utility-select:focus-within, .locale-control:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,99,221,.12); }
+.auth-link-button { display:block; margin:11px auto 0; padding:5px 8px; border:0; color:var(--accent); background:transparent; font-size:13px; font-weight:800; cursor:pointer; }
+.auth-link-button:hover { text-decoration:underline; }
+.auth-link-button:disabled { opacity:.6; cursor:wait; }
+.auth-inline-hint { margin:12px 0 0; color:var(--muted); font-size:12px; line-height:1.6; text-align:center; }
+.theme-preview-system { display:flex; align-items:center; justify-content:center; gap:3px; color:var(--accent); background:linear-gradient(110deg,#fff 0 50%,#202737 50% 100%); border:1px solid var(--border); }
+.theme-preview-system svg:last-child { color:#cad3e5; }
+.settings-control-row select { max-width:100%; min-height:42px; padding:8px 12px; color:var(--text); background:var(--panel-2); border:1px solid var(--border); border-radius:10px; }
+.auth-screen[data-theme="dark"] .auth-feedback-error { color:#ffb8c0; background:#3a202a; border-color:#61313d; }
+.auth-screen[data-theme="dark"] .auth-feedback-success { color:#9de8c9; background:#183a32; border-color:#285e4f; }
+@media (max-width: 560px) {
+  .auth-utility-controls { margin-bottom:19px; }
+  .auth-utility-select select { max-width:115px; }
+  .locale-control { min-width:54px; justify-content:center; }
+}

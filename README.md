@@ -108,3 +108,35 @@ A matriz é uma base preliminar inspirada em editais anteriores, não uma previs
 - [UFRN / COMPERVE — programas de estudo de 2025](https://comperve.ufrn.br/conteudo/concursos/ufrn_2025_22_23/programas.php)
 - [CAIXA — edital de 2024](https://www.caixa.gov.br/Downloads/concurso-publico-editais/EDITAL_N_01_2024_NM_DE_22_DE_FEVEREIRO_DE_2024_.pdf)
 - [Banco do Nordeste — edital de 2024](https://www.bnb.gov.br/documents/45807/5758094/Edital%2Bn%C2%BA%2B1%2B-%2BAbertura%2Bde%2Bconcurso%2Bp%C3%BAblico%2B2024.pdf)
+
+## 7. Idioma e aparência
+
+- O idioma inicial é inferido pelo idioma preferido do navegador (português do Brasil como padrão; inglês se o navegador estiver configurado para inglês). A seleção manual é guardada neste navegador.
+- O tema começa em **Seguir sistema**, respeitando `prefers-color-scheme` e as mudanças de tema do dispositivo. É possível escolher claro ou escuro na tela de login, na tela de sincronização e nas configurações. A preferência de tema também é mantida no estado do StudyMaximizer.
+- A interface e as mensagens operacionais mais importantes de autenticação, sincronização, erros e notificações têm traduções revisadas para português e inglês. O conteúdo programático continua em português para preservar a terminologia dos concursos.
+- A tela de login detecta também o link de recuperação de senha do Supabase; o usuário pode definir uma nova senha e continuar para o ambiente de estudos.
+- Não há chamada a uma API pública de tradução automática: isso poderia enviar textos do aplicativo a terceiros, variar as traduções de mensagens de segurança e depender de um serviço externo. Para adicionar outros idiomas com qualidade, a aplicação usa um catálogo extensível em `src/i18n.js`. Uma API de tradução pode ser integrada por uma função de servidor/Edge Function, nunca com uma chave secreta embutida no frontend estático.
+
+## 8. Personalizar o e-mail de confirmação do Supabase
+
+O projeto inclui um template HTML bilíngue com layout de e-mail responsivo:
+
+- `supabase/templates/confirm-signup.html` — corpo HTML;
+- `supabase/templates/confirm-signup-subject.txt` — assunto bilíngue.
+
+Para ativar o template:
+
+1. No painel Supabase, abra **Authentication → Email Templates → Confirm signup** (o nome pode aparecer como “Confirm sign up”).
+2. No campo **Subject**, cole o conteúdo de `confirm-signup-subject.txt`.
+3. No campo de corpo HTML, cole o arquivo `confirm-signup.html` completo.
+4. Salve a configuração e use o recurso de teste, quando disponível, ou crie uma conta de teste para conferir a entrega, a aparência e o link.
+5. Confirme em **Authentication → URL Configuration** que a URL do GitHub Pages está autorizada em `Redirect URLs`.
+
+O template usa `{{ .ConfirmationURL }}`, variável oficial do Supabase. A mensagem apresenta português e inglês no mesmo e-mail, já que o template padrão do Supabase não seleciona automaticamente um idioma por navegador do destinatário sem implementação adicional.
+
+
+### Mensagens de autenticação e privacidade
+
+- No login, o Supabase retorna uma falha genérica para credenciais inválidas; o cliente não tenta consultar a tabela interna de usuários para descobrir se o e-mail existe. Isso evita expor a lista de contas por tentativas de login. A interface oferece cadastro e recuperação de senha como próximos passos.
+- Quando o Supabase permite reconhecer uma tentativa de cadastro duplicada, o StudyMaximizer informa que o e-mail já está associado a uma conta e oferece as ações de reenviar confirmação e redefinir a senha. O estado de confirmação não é inferido por uma consulta administrativa no navegador. Se o login retornar explicitamente `email_not_confirmed`, a mensagem informa que a confirmação está pendente.
+- Para manter as mensagens de autenticação precisas e consistentes, português e inglês usam um catálogo de traduções revisado em `src/i18n.js`. Uma API de tradução automática não é chamada diretamente do navegador: isso pode expor textos do aplicativo, criar dependência de terceiros e traduzir incorretamente mensagens de segurança. Idiomas adicionais podem ser adicionados ao catálogo; uma API de tradução opcional deve ser chamada por uma Edge Function com credenciais mantidas no servidor.
