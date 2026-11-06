@@ -70,12 +70,12 @@ No Supabase, abra **Authentication → URL Configuration**:
 - Em **Redirect URLs**, permita o mesmo endereço com `/**` ao final, e `http://localhost:5173/**` para desenvolvimento local.
 - Salve as alterações.
 
-Substitua os exemplos acima pelo endereço real do seu repositório. Se a confirmação de e-mail estiver ativa no Supabase, ao criar uma conta será necessário abrir o e-mail de confirmação antes de fazer login.
+Substitua os exemplos acima pelo endereço real do seu repositório. Se a confirmação de e-mail estiver ativa no Supabase, ao criar uma conta será necessário abrir o e-mail de confirmação antes de fazer login. A foto selecionada no cadastro fica temporariamente no navegador e é enviada após a primeira autenticação bem-sucedida; para não perder o rascunho, confirme a conta no mesmo navegador em que iniciou o cadastro.
 
 ## 6. Primeiro login e migração dos dados locais
 
 1. Abra o StudyMaximizer publicado.
-2. Crie uma conta com seu e-mail e uma senha de pelo menos seis caracteres, ou entre em uma conta existente.
+2. Crie uma conta com nome completo, nome de usuário único, data de nascimento, e-mail e senha de pelo menos seis caracteres. A foto de perfil é opcional. Contas antigas continuam podendo entrar por e-mail.
 3. Na primeira autenticação, se a conta ainda não tiver registro na nuvem, o StudyMaximizer tenta migrar o progresso local deste navegador para a conta.
 4. Espere o indicador mudar para **Sincronizado na nuvem** antes de fechar a aba.
 5. Entre com a mesma conta em outro computador; o cronograma, tarefas, sessões, tópicos, meta, XP e tema serão carregados da nuvem.
@@ -100,7 +100,25 @@ Se já existir uma linha para a conta na nuvem, os dados da nuvem serão tratado
 
 **O build falha**: abra **Actions**, selecione a execução vermelha e consulte o log da etapa `Build`.
 
-## Conteúdo programático
+## 7. Cadastro, perfil e login por nome de usuário
+
+O cadastro aceita nome completo, nome de usuário único, data de nascimento, e-mail, senha e foto de perfil opcional. O username é normalizado para minúsculas e aceita 3–24 caracteres: `a-z`, `0-9`, ponto, hífen e sublinhado. Os dados pessoais, incluindo data de nascimento e nome completo, ficam em `studymaximizer_profiles`, protegidos por RLS e acessíveis somente à própria conta. A foto compactada é armazenada no bucket `studymaximizer-avatars`; somente a imagem de perfil é pública por URL, mas só o proprietário autenticado pode enviar, substituir ou apagar arquivos dentro da própria pasta UUID.
+
+**Atualize o banco:** no Supabase, abra SQL Editor e execute novamente `supabase/schema.sql`. O script inclui as tabelas, o trigger de perfil, a função de verificação de disponibilidade do username e as políticas de Storage; não remove os registros de progresso.
+
+**Publique login por username:** a autenticação por e-mail continua funcionando diretamente. Para entrar usando nome de usuário, publique a Edge Function incluída (a função resolve o e-mail no servidor, sem devolver o e-mail ao navegador):
+
+```bash
+supabase login
+supabase link --project-ref SEU_PROJECT_REF
+supabase functions deploy username-login --no-verify-jwt
+```
+
+A função precisa usar a secret `SUPABASE_SERVICE_ROLE_KEY` do ambiente gerenciado pelo Supabase e nunca no frontend. O script `supabase/config.toml` também documenta que essa função é chamada sem JWT de usuário porque o usuário ainda não está autenticado. A função faz a verificação de senha pelo endpoint oficial do Supabase Auth e retorna a sessão apenas quando a senha está correta.
+
+A foto selecionada durante o cadastro é mantida localmente até a primeira autenticação e enviada após a conta confirmar e entrar. Para que ela seja enviada imediatamente, faça o primeiro login no mesmo navegador/dispositivo em que escolheu a foto. Se confirmar e entrar em outro dispositivo, o rascunho não estará nesse dispositivo; ele continuará no navegador original e poderá ser enviado quando você entrar por lá.
+
+## 8. Conteúdo programático
 
 A matriz é uma base preliminar inspirada em editais anteriores, não uma previsão de que todos os tópicos serão cobrados nos próximos concursos. Ajuste os tópicos aos futuros editais, pesos, banca e critérios eliminatórios.
 
@@ -109,7 +127,7 @@ A matriz é uma base preliminar inspirada em editais anteriores, não uma previs
 - [CAIXA — edital de 2024](https://www.caixa.gov.br/Downloads/concurso-publico-editais/EDITAL_N_01_2024_NM_DE_22_DE_FEVEREIRO_DE_2024_.pdf)
 - [Banco do Nordeste — edital de 2024](https://www.bnb.gov.br/documents/45807/5758094/Edital%2Bn%C2%BA%2B1%2B-%2BAbertura%2Bde%2Bconcurso%2Bp%C3%BAblico%2B2024.pdf)
 
-## 7. Idioma e aparência
+## 9. Idioma e aparência
 
 - O idioma inicial é inferido pelo idioma preferido do navegador (português do Brasil como padrão; inglês se o navegador estiver configurado para inglês). A seleção manual é guardada neste navegador.
 - O tema começa em **Seguir sistema**, respeitando `prefers-color-scheme` e as mudanças de tema do dispositivo. É possível escolher claro ou escuro na tela de login, na tela de sincronização e nas configurações. A preferência de tema também é mantida no estado do StudyMaximizer.
@@ -117,7 +135,7 @@ A matriz é uma base preliminar inspirada em editais anteriores, não uma previs
 - A tela de login detecta também o link de recuperação de senha do Supabase; o usuário pode definir uma nova senha e continuar para o ambiente de estudos.
 - Não há chamada a uma API pública de tradução automática: isso poderia enviar textos do aplicativo a terceiros, variar as traduções de mensagens de segurança e depender de um serviço externo. Para adicionar outros idiomas com qualidade, a aplicação usa um catálogo extensível em `src/i18n.js`. Uma API de tradução pode ser integrada por uma função de servidor/Edge Function, nunca com uma chave secreta embutida no frontend estático.
 
-## 8. Personalizar o e-mail de confirmação do Supabase
+## 10. Personalizar o e-mail de confirmação do Supabase
 
 O projeto inclui um template HTML bilíngue com layout de e-mail responsivo:
 

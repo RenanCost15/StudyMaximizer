@@ -5,6 +5,8 @@ const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY?.tr
 
 export const supabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey);
 export const CLOUD_TABLE = 'studymaximizer_user_data';
+export const PROFILE_TABLE = 'studymaximizer_profiles';
+export const AVATAR_BUCKET = 'studymaximizer-avatars';
 
 // Only the public/publishable key belongs in a browser application.
 // Never use a service_role or secret key in VITE_* variables.

@@ -9,16 +9,51 @@ import {
   RefreshCw, Search, Settings2, ShieldCheck, SlidersHorizontal, Sprout, Sun,
   Target, Timer, TrendingUp, Trophy, Upload, Workflow, X, Zap, Banknote,
   Calculator, ClipboardList, Database, Scale, Bird, CheckCheck, Filter, Mail,
+  UserRound, AtSign, ImagePlus, CalendarClock,
 } from 'lucide-react';
 import { SUBJECTS, TRACKS, SOURCES, flattenSubject, slug } from './data/syllabus.js';
 import { WEEK_PLAN, PLANNED_HOURS_PER_WEEK, PLANNED_STUDY_DAYS } from './data/schedule.js';
-import { supabase, supabaseConfigured, CLOUD_TABLE } from './lib/supabase.js';
+import { supabase, supabaseConfigured, CLOUD_TABLE, PROFILE_TABLE, AVATAR_BUCKET } from './lib/supabase.js';
 import { detectInitialLocale, LANGUAGE_STORAGE_KEY, SUPPORTED_LOCALES, translate, translateAuthError, setActiveLocale, getActiveLocale } from './i18n.js';
 
 const STORAGE_KEY = 'studymaximizer-react-v2';
 const CLOUD_MIGRATION_OWNER_KEY = 'studymaximizer-cloud-migration-owner-v1';
 const THEME_PREFERENCE_KEY = 'studymaximizer-theme-preference-v1';
 const userCacheKey = userId => `${STORAGE_KEY}:user:${userId}`;
+const pendingAvatarKeyForEmail = email => `studymaximizer-pending-avatar:${String(email || '').trim().toLowerCase()}`;
+const USERNAME_PATTERN = /^[a-z0-9._-]{3,24}$/;
+
+async function compressAvatarFile(file) {
+  if (!file || !['image/jpeg', 'image/png', 'image/webp'].includes(String(file.type || '').toLowerCase())) throw new Error('avatar_invalid_type');
+  if (file.size > 5 * 1024 * 1024) throw new Error('avatar_too_large');
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('avatar_decode_failed'));
+      image.src = objectUrl;
+    });
+    const maxSide = 512;
+    const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('avatar_compress_failed');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.84));
+    if (!blob) throw new Error('avatar_compress_failed');
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('avatar_read_failed'));
+      reader.readAsDataURL(blob);
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
 const LEVELS = [
   { name: 'Despertar', threshold: 0, subtitle: 'O primeiro passo já conta.', Icon: Sprout },
   { name: 'Explorador', threshold: 500, subtitle: 'Você está construindo seu método.', Icon: Compass },
@@ -354,6 +389,7 @@ function App() {
   const [sessionModal, setSessionModal] = useState(null);
   const [toast, setToast] = useState('');
   const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(() => typeof window !== 'undefined' && /type=recovery/i.test(window.location.hash));
   const [authLoading, setAuthLoading] = useState(supabaseConfigured);
   const [cloudReady, setCloudReady] = useState(!supabaseConfigured);
@@ -367,6 +403,76 @@ function App() {
   const activeUserIdRef = useRef(null);
   const currentUserId = session?.user?.id || null;
   dataRef.current = data;
+
+  useEffect(() => {
+    if (!supabaseConfigured || !session?.user?.id) {
+      setProfile(null);
+      return undefined;
+    }
+    let alive = true;
+    const user = session.user;
+    const loadProfile = async () => {
+      setProfile({
+        full_name: user.user_metadata?.full_name || '',
+        username: user.user_metadata?.username || '',
+        date_of_birth: user.user_metadata?.date_of_birth || null,
+        avatar_path: null,
+      });
+      const { data: row, error } = await supabase
+        .from(PROFILE_TABLE)
+        .select('user_id, username, full_name, date_of_birth, avatar_path')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (!alive) return;
+      if (error) {
+        console.warn('Não foi possível carregar o perfil do StudyMaximizer.', error);
+        return;
+      }
+      let nextProfile = row || {
+        full_name: user.user_metadata?.full_name || '',
+        username: user.user_metadata?.username || '',
+        date_of_birth: user.user_metadata?.date_of_birth || null,
+        avatar_path: null,
+      };
+      const pendingKey = pendingAvatarKeyForEmail(user.email);
+      try {
+        const rawDraft = localStorage.getItem(pendingKey);
+        if (row && rawDraft) {
+          const draft = JSON.parse(rawDraft);
+          const expectedUsername = String(row.username || user.user_metadata?.username || '').toLowerCase();
+          if (draft.dataUrl && (!draft.username || String(draft.username).toLowerCase() === expectedUsername)) {
+            const imageResponse = await fetch(draft.dataUrl);
+            const imageBlob = await imageResponse.blob();
+            const path = `${user.id}/avatar.jpg`;
+            const { error: uploadError } = await supabase.storage
+              .from(AVATAR_BUCKET)
+              .upload(path, imageBlob, { upsert: true, contentType: 'image/jpeg', cacheControl: '3600' });
+            if (!uploadError) {
+              const { data: updatedRow, error: updateError } = await supabase
+                .from(PROFILE_TABLE)
+                .update({ avatar_path: path, updated_at: new Date().toISOString() })
+                .eq('user_id', user.id)
+                .select('user_id, username, full_name, date_of_birth, avatar_path')
+                .single();
+              if (!updateError) {
+                nextProfile = updatedRow;
+                localStorage.removeItem(pendingKey);
+              } else {
+                console.warn('A foto foi enviada, mas o perfil não foi atualizado.', updateError);
+              }
+            } else {
+              console.warn('Não foi possível enviar a foto de perfil.', uploadError);
+            }
+          }
+        }
+      } catch (avatarError) {
+        console.warn('Não foi possível concluir a migração da foto de perfil.', avatarError);
+      }
+      if (alive) setProfile(nextProfile);
+    };
+    loadProfile();
+    return () => { alive = false; };
+  }, [currentUserId]);
 
   useEffect(() => {
     try { localStorage.setItem(LANGUAGE_STORAGE_KEY, locale); } catch { /* language remains active in memory */ }
@@ -747,12 +853,12 @@ function App() {
       <aside className={`sidebar ${mobileMenuOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-lockup">
           <div className="brand-mark"><GraduationCap size={25} strokeWidth={2.2} /></div>
-          <div className="brand-name-wrap"><span className="brand-name">{translate("StudyMaximizer")}</span><span className="brand-caption">{translate("STUDY WITH PURPOSE")}</span></div>
+          <div className="brand-name-wrap"><span className="brand-name">{translate("StudyMaximizer")}</span><span className="brand-caption">{translate('Estude com propósito', locale)}</span></div>
           <button className="icon-button sidebar-close" aria-label={translate("Fechar menu")} onClick={() => setMobileMenuOpen(false)}><X size={18} /></button>
         </div>
-        <div className="sidebar-profile">
-          <div className="profile-avatar"><BookOpen size={20} /></div>
-          <div className="profile-copy"><strong>{session?.user?.email || tx('Minha preparação')}</strong><span>{supabaseConfigured ? tx('Conta sincronizada') : 'Concursos 2027 · ciclo-base'}</span></div>
+        <div className="sidebar-profile" title={session?.user?.email || undefined}>
+          <div className="profile-avatar">{profile?.avatar_path && supabase ? <img src={supabase.storage.from(AVATAR_BUCKET).getPublicUrl(profile.avatar_path).data.publicUrl} alt={tx('Foto de perfil')} /> : <BookOpen size={20} />}</div>
+          <div className="profile-copy"><strong title={profile?.full_name || session?.user?.email || ''}>{profile?.full_name || session?.user?.user_metadata?.full_name || session?.user?.email || tx('Minha preparação')}</strong><span title={session?.user?.email || ''}>{profile?.username ? `@${profile.username}` : (supabaseConfigured ? tx('Conta sincronizada') : tx('Concursos 2027 · ciclo-base'))}</span></div>
           <span className={`profile-dot ${cloudStatus === 'error' ? 'profile-dot-error' : ''}`} title={cloudStatusText} />
         </div>
         <div className="nav-label">{tx('ACOMPANHAMENTO')}</div>
@@ -852,6 +958,11 @@ function AuthScreen({ theme, themePreference, onThemeChange, locale, onLocaleCha
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [username, setUsername] = useState('');
+  const [birthDate, setBirthDate] = useState('');
+  const [avatarDataUrl, setAvatarDataUrl] = useState('');
+  const [avatarPreparing, setAvatarPreparing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -859,114 +970,207 @@ function AuthScreen({ theme, themePreference, onThemeChange, locale, onLocaleCha
   const [canReset, setCanReset] = useState(false);
   const tx = text => translate(text, locale);
 
+  const clearFeedback = () => { setError(''); setMessage(''); setCanResend(false); setCanReset(false); };
+
+  const handleAvatarChange = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setAvatarPreparing(true);
+    setError('');
+    try {
+      setAvatarDataUrl(await compressAvatarFile(file));
+    } catch (avatarError) {
+      setError(tx(avatarError.message === 'avatar_too_large' ? 'A foto deve ter no máximo 5 MB.' : avatarError.message === 'avatar_invalid_type' ? 'Selecione um arquivo de imagem válido.' : 'Não foi possível preparar a foto. Tente outra imagem.'));
+      setAvatarDataUrl('');
+    } finally {
+      setAvatarPreparing(false);
+    }
+  };
+
   const resendConfirmation = async () => {
-    if (!email.trim()) {
-      setError(tx('Informe um endereço de e-mail válido.'));
+    if (!email.trim() || !email.includes('@')) {
+      setError(tx('Para reenviar a confirmação, informe o e-mail cadastrado.'));
       return;
     }
-    setBusy(true);
-    setError('');
-    setMessage('');
+    setBusy(true); setError(''); setMessage('');
     try {
       const { error: requestError } = await supabase.auth.resend({
-        type: 'signup', email: email.trim(), options: { emailRedirectTo: window.location.href },
+        type: 'signup', email: email.trim(), options: { emailRedirectTo: `${window.location.origin}${window.location.pathname}` },
       });
       if (requestError) throw requestError;
       setMessage(tx('Se houver um cadastro pendente para este e-mail, enviaremos uma nova mensagem de confirmação. Confira também a pasta de spam.'));
     } catch (requestError) {
       setError(translateAuthError(requestError, locale, 'signup'));
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
   const resetPassword = async () => {
-    if (!email.trim()) {
-      setError(tx('Informe um endereço de e-mail válido.'));
+    if (!email.trim() || !email.includes('@')) {
+      setError(tx('Para recuperar a senha, informe o e-mail cadastrado, não o nome de usuário.'));
       return;
     }
-    setBusy(true);
-    setError('');
-    setMessage('');
+    setBusy(true); setError(''); setMessage('');
     try {
       const { error: requestError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-        redirectTo: window.location.href,
+        redirectTo: `${window.location.origin}${window.location.pathname}`,
       });
       if (requestError) throw requestError;
       setMessage(tx('Se existir uma conta associada a este e-mail, enviaremos instruções para redefinir a senha.'));
     } catch (requestError) {
       setError(translateAuthError(requestError, locale, 'login'));
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   };
 
   const submit = async event => {
     event.preventDefault();
-    setBusy(true);
-    setError('');
-    setMessage('');
-    setCanResend(false);
-    setCanReset(false);
+    if (avatarPreparing) return;
+    setBusy(true); clearFeedback();
+    let avatarDraftKey = null;
+    let preserveAvatarDraft = false;
+    let usernameUnavailable = false;
     try {
       if (mode === 'signup') {
+        const normalizedName = fullName.trim().replace(/\s+/g, ' ');
+        const normalizedUsername = username.trim().replace(/^@/, '').toLowerCase();
+        if (normalizedName.length < 3 || normalizedName.split(' ').length < 2) {
+          setError(tx('Informe seu nome completo, com nome e sobrenome.'));
+          return;
+        }
+        if (!USERNAME_PATTERN.test(normalizedUsername)) {
+          setError(tx('O nome de usuário deve ter de 3 a 24 caracteres: letras sem acento, números, ponto, hífen ou sublinhado.'));
+          return;
+        }
+        if (!birthDate || birthDate > dateKey(new Date())) {
+          setError(tx('Informe uma data de nascimento válida, que não seja futura.'));
+          return;
+        }
+        const { data: available, error: availabilityError } = await supabase.rpc('is_studymaximizer_username_available', {
+          candidate_username: normalizedUsername,
+        });
+        if (availabilityError) {
+          setError(tx('Não foi possível verificar o nome de usuário. Atualize o script supabase/schema.sql no projeto Supabase e tente novamente.'));
+          return;
+        }
+        // Try the Auth sign-up even when the username pre-check says unavailable:
+        // Auth can then report a duplicate e-mail first, preserving the expected recovery flow.
+        usernameUnavailable = available !== true;
+        if (avatarDataUrl) {
+          avatarDraftKey = pendingAvatarKeyForEmail(email);
+          try {
+            localStorage.setItem(avatarDraftKey, JSON.stringify({ dataUrl: avatarDataUrl, username: normalizedUsername, createdAt: new Date().toISOString() }));
+          } catch {
+            setError(tx('Não foi possível preparar a foto neste navegador. Tente uma imagem menor.'));
+            return;
+          }
+        }
         const { data: result, error: requestError } = await supabase.auth.signUp({
           email: email.trim(), password,
-          options: { emailRedirectTo: window.location.href },
+          options: {
+            emailRedirectTo: `${window.location.origin}${window.location.pathname}`,
+            data: { full_name: normalizedName, username: normalizedUsername, date_of_birth: birthDate },
+          },
         });
         if (requestError) throw requestError;
         const identities = result?.user?.identities;
-        // Supabase obfuscates some duplicate sign-ups. An empty identity list is its documented signal
-        // for an existing confirmed account when email confirmation is enabled.
         if (Array.isArray(identities) && identities.length === 0) {
           setError(tx('Este e-mail já está associado a uma conta. Tente entrar; se a confirmação estiver pendente, solicite outro e-mail, ou redefina sua senha.'));
-          setMode('login');
-          setCanResend(true);
-          setCanReset(true);
-        } else if (result?.session) {
-          setMessage(tx('Conta criada. Abrindo seu espaço de estudos…'));
+          setMode('login'); setCanResend(true); setCanReset(true);
+        } else if (usernameUnavailable) {
+          setError(tx('Esse nome de usuário já está em uso. Escolha outro.'));
         } else {
-          setMessage(tx('Cadastro aguardando confirmação. Confira seu e-mail. Se este endereço já tinha um cadastro pendente, solicite um novo e-mail de confirmação abaixo.'));
-          setCanResend(true);
+          preserveAvatarDraft = Boolean(avatarDraftKey);
+          if (result?.session) {
+            setMessage(tx('Conta criada. Abrindo seu espaço de estudos…'));
+          } else {
+            setMessage(tx('Cadastro aguardando confirmação. Confira seu e-mail. Se este endereço já tinha um cadastro pendente, solicite um novo e-mail de confirmação abaixo.'));
+            setCanResend(true);
+          }
         }
       } else {
-        const { error: requestError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-        if (requestError) throw requestError;
+        const identifier = email.trim();
+        if (identifier.includes('@')) {
+          const { error: requestError } = await supabase.auth.signInWithPassword({ email: identifier, password });
+          if (requestError) throw requestError;
+        } else {
+          const { data: tokenData, error: functionError } = await supabase.functions.invoke('username-login', {
+            body: { username: identifier.replace(/^@/, '').toLowerCase(), password },
+          });
+          if (functionError) {
+            if (functionError?.context?.status === 404) {
+              setError(tx('O login por nome de usuário ainda não está ativo. Publique a função username-login no Supabase seguindo o README.'));
+              return;
+            }
+            if (functionError?.context?.status === 429) throw new Error('username_rate_limited');
+            if (functionError?.context?.status >= 500) throw new Error('username_service_unavailable');
+            throw new Error('username_invalid_credentials');
+          }
+          if (tokenData?.error === 'email_not_confirmed') {
+            setError(tx('Seu e-mail ainda não foi confirmado. Confira a caixa de entrada e o spam ou solicite outro e-mail de confirmação.'));
+            setCanResend(true);
+            return;
+          }
+          const tokens = tokenData?.session || tokenData;
+          if (!tokens?.access_token || !tokens?.refresh_token) throw new Error('username_invalid_credentials');
+          const { error: sessionError } = await supabase.auth.setSession({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
+          if (sessionError) throw sessionError;
+        }
         setMessage(tx('Login confirmado. Carregando seu progresso…'));
       }
     } catch (requestError) {
-      const code = String(requestError?.code || '').toLowerCase();
-      const errorText = translateAuthError(requestError, locale, mode);
-      setError(errorText);
-      if (code === 'email_not_confirmed' || String(requestError?.message || '').toLowerCase().includes('email not confirmed')) setCanResend(true);
+      const code = String(requestError?.code || requestError?.name || '').toLowerCase();
+      const messageText = String(requestError?.message || '').toLowerCase();
+      if (messageText === 'username_invalid_credentials') {
+        setError(tx('Nome de usuário ou senha incorretos. Confira os dados e tente novamente.'));
+      } else if (messageText === 'username_rate_limited' || requestError?.status === 429) {
+        setError(tx('Muitas tentativas. Aguarde alguns minutos e tente novamente.'));
+      } else if (messageText === 'username_service_unavailable') {
+        setError(tx('Não foi possível validar o login por nome de usuário agora. Tente novamente mais tarde.'));
+      } else if (mode === 'signup' && (['user_already_exists', 'email_exists'].includes(code) || messageText.includes('user already registered') || messageText.includes('email address already exists'))) {
+        setError(tx('Este e-mail já está cadastrado. Faça login; se a confirmação estiver pendente, solicite um novo e-mail.'));
+        setCanResend(true); setCanReset(true);
+      } else if (mode === 'signup' && (usernameUnavailable || code === '23505' || messageText.includes('studymaximizer_profiles_username'))) {
+        setError(tx('Esse nome de usuário já está em uso. Escolha outro.'));
+      } else {
+        setError(translateAuthError(requestError, locale, mode));
+      }
+      if (code === 'email_not_confirmed' || messageText.includes('email not confirmed')) setCanResend(true);
       if (mode === 'signup' && ['user_already_exists', 'email_exists'].includes(code)) { setCanResend(true); setCanReset(true); }
       if (mode === 'login') setCanReset(true);
     } finally {
+      if (avatarDraftKey && !preserveAvatarDraft) {
+        try { localStorage.removeItem(avatarDraftKey); } catch { /* ignore storage failure */ }
+      }
       setBusy(false);
     }
   };
 
   return <main className="auth-screen" data-theme={theme}>
-    <section className="auth-card">
+    <section className={`auth-card ${mode === 'signup' ? 'auth-card-signup' : ''}`}>
       <ThemeLocaleControls themePreference={themePreference} theme={theme} onThemeChange={onThemeChange} locale={locale} onLocaleChange={onLocaleChange} tx={tx} />
-      <div className="auth-brand"><div className="auth-logo-mark"><GraduationCap size={29} /></div><div><strong>{translate("StudyMaximizer")}</strong><span>{translate("STUDY WITH PURPOSE")}</span></div></div>
+      <div className="auth-brand"><div className="auth-logo-mark"><GraduationCap size={29} /></div><div><strong>StudyMaximizer</strong><span>{tx('Estude com propósito')}</span></div></div>
       <div className="auth-intro"><span className="auth-eyebrow">{tx('Sua preparação, em qualquer lugar')}</span><h1>{mode === 'login' ? tx('Entre na sua conta') : tx('Crie sua conta')}</h1><p>{mode === 'login' ? tx('Acesse seu cronograma, progresso e histórico sincronizados.') : tx('Crie sua conta para manter seus estudos sincronizados entre dispositivos.')}</p></div>
       <form className="auth-form" onSubmit={submit}>
-        <label className="auth-field"><span>{tx('E-mail')}</span><div><Mail size={18} /><input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} placeholder={translate("voce@exemplo.com")} /></div></label>
-        <label className="auth-field"><span>{tx('Senha')}</span><div><LockKeyhole size={18} /><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={6} required value={password} onChange={event => setPassword(event.target.value)} placeholder={tx('Pelo menos 6 caracteres')} /></div></label>
+        {mode === 'signup' && <>
+          <label className="auth-field"><span>{tx('Nome completo')}</span><div><UserRound size={18} /><input type="text" name="full_name" autoComplete="name" minLength={3} maxLength={100} required value={fullName} onChange={event => setFullName(event.target.value)} placeholder={tx('Digite seu nome e sobrenome')} /></div></label>
+          <label className="auth-field"><span>{tx('Nome de usuário')}</span><div><AtSign size={18} /><input type="text" name="username" autoComplete="username" minLength={3} maxLength={24} required value={username} onChange={event => setUsername(event.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, ''))} placeholder={tx('Ex.: renancosta')} /></div><small className="auth-field-hint">{tx('Você poderá usar esse nome para entrar. Use 3 a 24 caracteres, sem espaços.')}</small></label>
+          <label className="auth-field"><span>{tx('Data de nascimento')}</span><div><CalendarClock size={18} /><input type="date" name="birth_date" autoComplete="bday" max={dateKey(new Date())} required value={birthDate} onChange={event => setBirthDate(event.target.value)} /></div></label>
+          <div className="auth-field"><span>{tx('Foto de perfil')}</span><div className="auth-avatar-picker"><div className="auth-avatar-preview">{avatarDataUrl ? <img src={avatarDataUrl} alt={tx('Prévia da foto de perfil')} /> : <UserRound size={28} />}</div><div className="auth-avatar-picker-copy"><strong>{tx('Personalize sua conta')}</strong><small>{tx('Imagem opcional; será enviada após a confirmação da conta. Máximo de 5 MB.')}</small><label className="auth-avatar-pick"><ImagePlus size={16} />{avatarPreparing ? tx('Preparando imagem…') : avatarDataUrl ? tx('Trocar foto') : tx('Escolher foto')}<input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleAvatarChange} disabled={busy || avatarPreparing} /></label>{avatarDataUrl && <button className="auth-avatar-remove" type="button" onClick={() => setAvatarDataUrl('')} disabled={busy}>{tx('Remover foto')}</button>}</div></div></div>
+        </>}
+        <label className="auth-field"><span>{mode === 'login' ? tx('E-mail ou nome de usuário') : tx('E-mail')}</span><div><Mail size={18} /><input type={mode === 'signup' ? 'email' : 'text'} name={mode === 'login' ? 'username' : 'email'} autoComplete={mode === 'login' ? 'username' : 'email'} required value={email} onChange={event => setEmail(event.target.value)} placeholder={mode === 'login' ? tx('Digite seu e-mail ou nome de usuário') : translate('voce@exemplo.com', locale)} /></div></label>
+        <label className="auth-field"><span>{tx('Senha')}</span><div><LockKeyhole size={18} /><input type="password" name="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={6} required value={password} onChange={event => setPassword(event.target.value)} placeholder={tx('Pelo menos 6 caracteres')} /></div></label>
         {error && <div className="auth-feedback auth-feedback-error" role="alert"><CircleAlert size={17} /><span>{error}</span></div>}
         {message && <div className="auth-feedback auth-feedback-success" role="status"><CheckCircle2 size={17} /><span>{message}</span></div>}
-        <button className="button button-primary auth-submit" type="submit" disabled={busy}>{busy ? <RefreshCw size={17} className="auth-spinner" /> : <ArrowRight size={17} />}{busy ? tx('Processando…') : mode === 'login' ? tx('Entrar e sincronizar') : tx('Criar conta')}</button>
+        <button className="button button-primary auth-submit" type="submit" disabled={busy || avatarPreparing}>{busy ? <RefreshCw size={17} className="auth-spinner" /> : <ArrowRight size={17} />}{busy ? tx('Processando…') : mode === 'login' ? tx('Entrar e sincronizar') : tx('Criar conta')}</button>
       </form>
       {mode === 'login' && <button type="button" className="auth-link-button" disabled={busy} onClick={resetPassword}>{tx('Esqueci minha senha')}</button>}
       {canResend && <button type="button" className="auth-link-button" disabled={busy} onClick={resendConfirmation}>{busy ? tx('Processando…') : tx('Reenviar confirmação')}</button>}
-      <div className="auth-switch"><span>{mode === 'login' ? tx('Ainda não tem conta?') : tx('Já tem uma conta?')}</span><button type="button" onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setMessage(''); setCanResend(false); setCanReset(false); }}>{mode === 'login' ? tx('Criar conta') : tx('Fazer login')}</button></div>
+      <div className="auth-switch"><span>{mode === 'login' ? tx('Ainda não tem conta?') : tx('Já tem uma conta?')}</span><button type="button" disabled={busy} onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); clearFeedback(); }}>{mode === 'login' ? tx('Criar conta') : tx('Fazer login')}</button></div>
       {canReset && error && <p className="auth-inline-hint">{tx('Para proteger sua conta, o login não informa se o e-mail não está cadastrado ou se a senha está incorreta. Se necessário, crie uma conta ou recupere a senha.')}</p>}
       <div className="auth-security-note"><ShieldCheck size={17} /><span>{tx('Seus registros são privados. O banco aplica regras para que cada conta acesse apenas os próprios dados.')}</span></div>
     </section>
   </main>;
 }
-
 
 function PasswordRecoveryScreen({ theme, themePreference, onThemeChange, locale, onLocaleChange, onContinue }) {
   const [password, setPassword] = useState('');
@@ -1002,7 +1206,7 @@ function PasswordRecoveryScreen({ theme, themePreference, onThemeChange, locale,
   return <main className="auth-screen" data-theme={theme}>
     <section className="auth-card">
       <ThemeLocaleControls themePreference={themePreference} theme={theme} onThemeChange={onThemeChange} locale={locale} onLocaleChange={onLocaleChange} tx={tx} />
-      <div className="auth-brand"><div className="auth-logo-mark"><GraduationCap size={29} /></div><div><strong>StudyMaximizer</strong><span>STUDY WITH PURPOSE</span></div></div>
+      <div className="auth-brand"><div className="auth-logo-mark"><GraduationCap size={29} /></div><div><strong>StudyMaximizer</strong><span>{tx('Estude com propósito')}</span></div></div>
       <div className="auth-intro"><span className="auth-eyebrow">{tx('Segurança da conta')}</span><h1>{saved ? tx('Senha atualizada') : tx('Criar uma nova senha')}</h1><p>{saved ? tx('Sua senha foi atualizada com sucesso. Continue para voltar ao seu espaço de estudos.') : tx('Escolha uma nova senha para recuperar o acesso à sua conta.')}</p></div>
       {saved ? <div className="auth-action-row"><button className="button button-primary auth-submit" type="button" onClick={onContinue}>{tx('Continuar para meus estudos')} <ArrowRight size={17} /></button></div> : <form className="auth-form" onSubmit={submit}>
         <label className="auth-field"><span>{tx('Nova senha')}</span><div><LockKeyhole size={18} /><input type="password" autoComplete="new-password" minLength={6} required value={password} onChange={event => setPassword(event.target.value)} placeholder={tx('Pelo menos 6 caracteres')} /></div></label>
