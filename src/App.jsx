@@ -8,12 +8,15 @@ import {
   ListChecks, ListTodo, LockKeyhole, Menu, Moon, NotebookPen, PenLine, Plus,
   RefreshCw, Search, Settings2, ShieldCheck, SlidersHorizontal, Sprout, Sun,
   Target, Timer, TrendingUp, Trophy, Upload, Workflow, X, Zap, Banknote,
-  Calculator, ClipboardList, Database, Scale, Bird, CheckCheck, Filter,
+  Calculator, ClipboardList, Database, Scale, Bird, CheckCheck, Filter, Mail,
 } from 'lucide-react';
 import { SUBJECTS, TRACKS, SOURCES, flattenSubject, slug } from './data/syllabus.js';
 import { WEEK_PLAN, PLANNED_HOURS_PER_WEEK, PLANNED_STUDY_DAYS } from './data/schedule.js';
+import { supabase, supabaseConfigured, CLOUD_TABLE } from './lib/supabase.js';
 
 const STORAGE_KEY = 'studymaximizer-react-v2';
+const CLOUD_MIGRATION_OWNER_KEY = 'studymaximizer-cloud-migration-owner-v1';
+const userCacheKey = userId => `${STORAGE_KEY}:user:${userId}`;
 const LEVELS = [
   { name: 'Despertar', threshold: 0, subtitle: 'O primeiro passo já conta.', Icon: Sprout },
   { name: 'Explorador', threshold: 500, subtitle: 'Você está construindo seu método.', Icon: Compass },
@@ -42,6 +45,51 @@ const emptyState = {
   sessions: [],
   targetHours: PLANNED_HOURS_PER_WEEK,
 };
+
+function normalizeAppState(value) {
+  const input = value && typeof value === 'object' ? value : {};
+  return {
+    ...emptyState,
+    ...input,
+    version: 2,
+    theme: input.theme === 'dark' ? 'dark' : 'light',
+    completedTasks: input.completedTasks && typeof input.completedTasks === 'object' ? input.completedTasks : {},
+    topicDone: input.topicDone && typeof input.topicDone === 'object' ? input.topicDone : {},
+    topicStatus: input.topicStatus && typeof input.topicStatus === 'object' ? input.topicStatus : {},
+    sessions: Array.isArray(input.sessions) ? input.sessions : [],
+    targetHours: Math.max(1, Math.min(60, Number(input.targetHours) || PLANNED_HOURS_PER_WEEK)),
+  };
+}
+
+function mergeAppStates(localState, remoteState) {
+  const local = normalizeAppState(localState);
+  const remote = normalizeAppState(remoteState);
+  const sessionsById = new Map();
+  [...local.sessions, ...remote.sessions].forEach((session, index) => {
+    const id = session.id || `${session.date || 'session'}-${index}`;
+    sessionsById.set(id, { ...sessionsById.get(id), ...session, id });
+  });
+  const sessions = [...sessionsById.values()].sort((a, b) =>
+    String(a.date || '').localeCompare(String(b.date || '')) || String(a.id).localeCompare(String(b.id))
+  );
+  return {
+    ...local,
+    ...remote,
+    completedTasks: { ...local.completedTasks, ...remote.completedTasks },
+    topicDone: { ...local.topicDone, ...remote.topicDone },
+    topicStatus: { ...local.topicStatus, ...remote.topicStatus },
+    sessions,
+  };
+}
+
+function readUserCache(userId) {
+  try {
+    const raw = localStorage.getItem(userCacheKey(userId));
+    return raw ? normalizeAppState(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
 
 const oldSubjectMap = {
   'Português': 'portugues',
@@ -275,12 +323,198 @@ function App() {
   const [expandedGroups, setExpandedGroups] = useState({});
   const [sessionModal, setSessionModal] = useState(null);
   const [toast, setToast] = useState('');
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(supabaseConfigured);
+  const [cloudReady, setCloudReady] = useState(!supabaseConfigured);
+  const [cloudStatus, setCloudStatus] = useState(supabaseConfigured ? 'connecting' : 'local');
+  const [cloudError, setCloudError] = useState('');
+  const [cloudRetry, setCloudRetry] = useState(0);
+  const [cloudPushRetry, setCloudPushRetry] = useState(0);
   const importInputRef = useRef(null);
+  const dataRef = useRef(data);
+  const remoteDataRef = useRef(null);
+  const activeUserIdRef = useRef(null);
+  const currentUserId = session?.user?.id || null;
+  dataRef.current = data;
 
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
-    catch (error) { console.warn('Falha ao salvar no armazenamento local.', error); }
-  }, [data]);
+    if (!supabaseConfigured) {
+      setAuthLoading(false);
+      setCloudReady(true);
+      setCloudStatus('local');
+      return undefined;
+    }
+    let alive = true;
+    supabase.auth.getSession().then(({ data: result, error }) => {
+      if (!alive) return;
+      if (error) setCloudError(error.message || 'Não foi possível consultar a sessão.');
+      const nextSession = result?.session || null;
+      const nextUserId = nextSession?.user?.id || null;
+      if (activeUserIdRef.current !== nextUserId) {
+        activeUserIdRef.current = nextUserId;
+        remoteDataRef.current = null;
+        setCloudReady(false);
+      }
+      setSession(nextSession);
+      setAuthLoading(false);
+    });
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!alive) return;
+      const nextUserId = nextSession?.user?.id || null;
+      if (activeUserIdRef.current !== nextUserId) {
+        activeUserIdRef.current = nextUserId;
+        remoteDataRef.current = null;
+        setCloudReady(false);
+        setCloudStatus(nextUserId ? 'loading' : 'signed-out');
+      }
+      setSession(nextSession || null);
+      if (!nextSession) {
+        setCloudReady(false);
+        setCloudStatus('signed-out');
+        remoteDataRef.current = null;
+      }
+    });
+    return () => {
+      alive = false;
+      authListener?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabaseConfigured || !currentUserId) {
+      if (supabaseConfigured) setCloudReady(false);
+      return undefined;
+    }
+    let alive = true;
+    const loadFromCloud = async () => {
+      setCloudReady(false);
+      setCloudStatus('loading');
+      setCloudError('');
+      const { data: row, error } = await supabase
+        .from(CLOUD_TABLE)
+        .select('data, updated_at')
+        .eq('user_id', currentUserId)
+        .maybeSingle();
+      if (!alive) return;
+      if (error) {
+        setCloudError(`Não foi possível carregar seus dados: ${error.message}`);
+        setCloudStatus('error');
+        return;
+      }
+
+      if (row?.data) {
+        const normalized = normalizeAppState(row.data);
+        const snapshot = JSON.stringify(normalized);
+        remoteDataRef.current = snapshot;
+        setData(normalized);
+        try { localStorage.setItem(userCacheKey(currentUserId), snapshot); } catch {}
+        setCloudStatus('synced');
+        setCloudReady(true);
+        return;
+      }
+
+      // Migrate this browser's existing progress only once, to the first account linked.
+      // A separate cache is used for each account so one account cannot seed another.
+      const scopedCache = readUserCache(currentUserId);
+      const migrationOwner = localStorage.getItem(CLOUD_MIGRATION_OWNER_KEY);
+      let seedState;
+      if (scopedCache) {
+        seedState = scopedCache;
+      } else if (!migrationOwner || migrationOwner === currentUserId) {
+        seedState = normalizeAppState(dataRef.current);
+      } else {
+        seedState = normalizeAppState(emptyState);
+      }
+      const snapshot = JSON.stringify(seedState);
+      const { error: saveError } = await supabase
+        .from(CLOUD_TABLE)
+        .upsert({ user_id: currentUserId, data: seedState, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+      if (!alive) return;
+      if (saveError) {
+        setCloudError(`Não foi possível iniciar seu espaço na nuvem: ${saveError.message}`);
+        setCloudStatus('error');
+        return;
+      }
+      try {
+        localStorage.setItem(CLOUD_MIGRATION_OWNER_KEY, currentUserId);
+        localStorage.setItem(userCacheKey(currentUserId), snapshot);
+      } catch {}
+      remoteDataRef.current = snapshot;
+      setData(seedState);
+      setCloudStatus('synced');
+      setCloudReady(true);
+    };
+    loadFromCloud();
+    return () => { alive = false; };
+  }, [currentUserId, cloudRetry]);
+
+  useEffect(() => {
+    try {
+      if (!supabaseConfigured) localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      // Do not create a user-scoped cache until this user's cloud state has been loaded.
+      if (currentUserId && cloudReady) localStorage.setItem(userCacheKey(currentUserId), JSON.stringify(data));
+    } catch (error) { console.warn('Falha ao salvar o cache local.', error); }
+  }, [data, currentUserId, cloudReady]);
+
+  useEffect(() => {
+    if (!supabaseConfigured || !currentUserId || !cloudReady) return undefined;
+    const snapshot = JSON.stringify(data);
+    if (snapshot === remoteDataRef.current) return undefined;
+    const timeout = window.setTimeout(async () => {
+      setCloudStatus('saving');
+      setCloudError('');
+      const { error } = await supabase
+        .from(CLOUD_TABLE)
+        .upsert({ user_id: currentUserId, data: JSON.parse(snapshot), updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+      if (error) {
+        setCloudStatus('error');
+        setCloudError(`Não foi possível sincronizar: ${error.message}`);
+        return;
+      }
+      remoteDataRef.current = snapshot;
+      setCloudStatus('synced');
+      setCloudError('');
+    }, 650);
+    return () => window.clearTimeout(timeout);
+  }, [data, currentUserId, cloudReady, cloudPushRetry]);
+
+  useEffect(() => {
+    if (!supabaseConfigured || !currentUserId || !cloudReady) return undefined;
+    const handleOnline = () => setCloudPushRetry(value => value + 1);
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [currentUserId, cloudReady]);
+
+  useEffect(() => {
+    if (!supabaseConfigured || !currentUserId || !cloudReady) return undefined;
+    const channel = supabase
+      .channel(`studymaximizer-data-${currentUserId}`)
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: CLOUD_TABLE, filter: `user_id=eq.${currentUserId}`,
+      }, payload => {
+        const rowState = payload.new?.data;
+        if (!rowState) return;
+        const remoteState = normalizeAppState(rowState);
+        const remoteSnapshot = JSON.stringify(remoteState);
+        if (remoteSnapshot === remoteDataRef.current) return;
+        const localSnapshot = JSON.stringify(dataRef.current);
+        if (remoteSnapshot === localSnapshot) {
+          remoteDataRef.current = remoteSnapshot;
+          setCloudStatus('synced');
+          return;
+        }
+        const merged = mergeAppStates(dataRef.current, remoteState);
+        remoteDataRef.current = remoteSnapshot;
+        setData(merged);
+        setCloudStatus(JSON.stringify(merged) === remoteSnapshot ? 'synced' : 'saving');
+      })
+      .subscribe(status => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setCloudError('A conexão de atualização em tempo real caiu. Os salvamentos automáticos continuam tentando funcionar.');
+        }
+      });
+    return () => { supabase.removeChannel(channel); };
+  }, [currentUserId, cloudReady]);
   useEffect(() => {
     document.documentElement.dataset.theme = data.theme;
     const metaTheme = document.querySelector('meta[name="theme-color"]');
@@ -304,6 +538,19 @@ function App() {
 
   const notify = message => setToast(message);
   const updateData = fn => setData(previous => typeof fn === 'function' ? fn(previous) : ({ ...previous, ...fn }));
+  const handleSignOut = async () => {
+    if (!supabaseConfigured) return;
+    if (cloudStatus === 'saving') {
+      notify('Aguarde a sincronização terminar antes de sair.');
+      return;
+    }
+    const { error } = await supabase.auth.signOut();
+    if (error) setCloudError(`Não foi possível sair da conta: ${error.message}`);
+  };
+  const retryCloudSync = () => {
+    setCloudError('');
+    setCloudPushRetry(value => value + 1);
+  };
   const toggleTheme = () => updateData(previous => ({ ...previous, theme: previous.theme === 'dark' ? 'light' : 'dark' }));
   const toggleTask = (date, taskId) => {
     const key = taskKey(date, taskId);
@@ -401,7 +648,12 @@ function App() {
     />;
     if (view === 'tracks') return <TracksPage data={data} trackProgress={trackProgress} setSelectedTrack={setSelectedTrack} setView={setView} />;
     if (view === 'performance') return <PerformancePage data={data} stats={currentStats} selectedWeek={selectedWeek} trend={trend} deleteSession={deleteSession} openGeneralLog={() => setSessionModal({ date: todayKey, subjectId: 'portugues', track: 'all', minutes: 45, note: '' })} />;
-    if (view === 'settings') return <SettingsPage data={data} updateData={updateData} exportBackup={exportBackup} importBackup={() => importInputRef.current?.click()} />;
+    if (view === 'settings') return <SettingsPage
+      data={data} updateData={updateData} exportBackup={exportBackup}
+      importBackup={() => importInputRef.current?.click()} supabaseConfigured={supabaseConfigured}
+      session={session} cloudStatus={cloudStatus} cloudError={cloudError}
+      onSignOut={handleSignOut} onRetrySync={retryCloudSync}
+    />;
     return <OverviewPage
       data={data} stats={getWeekStats(data, startOfWeek(new Date()))} gamification={gamification} trend={trend}
       subjectProgressList={subjectProgressList} trackProgress={trackProgress} totalContentProgress={totalContentProgress}
@@ -409,6 +661,27 @@ function App() {
       openSchedule={() => setView('schedule')} openContent={() => setView('syllabus')} openPerformance={() => setView('performance')} openTracks={() => setView('tracks')}
     />;
   };
+
+  if (supabaseConfigured && authLoading) {
+    return <CloudStartupScreen title="Conferindo sua sessão" text="Conectando o StudyMaximizer à sua conta com segurança." />;
+  }
+  if (supabaseConfigured && !session) {
+    return <AuthScreen />;
+  }
+  if (supabaseConfigured && session && !cloudReady) {
+    return <CloudStartupScreen
+      title={cloudStatus === 'error' ? 'Não foi possível carregar seus dados' : 'Sincronizando seus dados'}
+      text={cloudStatus === 'error' ? (cloudError || 'Confira se executou o arquivo supabase/schema.sql no SQL Editor do Supabase.') : 'Estamos carregando seu progresso salvo na nuvem.'}
+      error={cloudStatus === 'error'} onRetry={() => setCloudRetry(value => value + 1)}
+      onSignOut={handleSignOut}
+    />;
+  }
+
+  const cloudStatusText = ({
+    local: 'Salvo neste navegador', connecting: 'Conectando à nuvem…', loading: 'Carregando nuvem…',
+    saving: 'Sincronizando…', synced: 'Sincronizado na nuvem', error: 'Falha na sincronização',
+    'signed-out': 'Sessão encerrada',
+  })[cloudStatus] || 'Sincronização automática';
 
   return (
     <div className="app-shell" data-theme={data.theme}>
@@ -421,8 +694,8 @@ function App() {
         </div>
         <div className="sidebar-profile">
           <div className="profile-avatar"><BookOpen size={20} /></div>
-          <div className="profile-copy"><strong>Minha preparação</strong><span>Concursos 2027 · ciclo-base</span></div>
-          <span className="profile-dot" title="Dados salvos neste navegador" />
+          <div className="profile-copy"><strong>{session?.user?.email || 'Minha preparação'}</strong><span>{supabaseConfigured ? 'Conta sincronizada' : 'Concursos 2027 · ciclo-base'}</span></div>
+          <span className={`profile-dot ${cloudStatus === 'error' ? 'profile-dot-error' : ''}`} title={cloudStatusText} />
         </div>
         <div className="nav-label">ACOMPANHAMENTO</div>
         <nav className="sidebar-nav" aria-label="Navegação principal">
@@ -446,7 +719,7 @@ function App() {
             <div><strong>Meta semanal</strong><span>{data.targetHours || 15} horas de estudo</span></div>
             <button aria-label="Editar meta" className="tiny-icon-button" onClick={() => setView('settings')}><Settings2 size={14} /></button>
           </div>
-          <div className="sidebar-note"><LockKeyhole size={14} /><span>Seus registros ficam neste navegador.</span></div>
+          <div className="sidebar-note"><LockKeyhole size={14} /><span>{supabaseConfigured ? 'Seus registros sincronizam com a nuvem.' : 'Seus registros ficam neste navegador.'}</span></div>
           <div className="sidebar-footer">STUDYMAXIMIZER <span>·</span> V2.0</div>
         </div>
       </aside>
@@ -460,7 +733,7 @@ function App() {
         <header className="topbar">
           <div className="breadcrumbs"><span>StudyMaximizer</span><ChevronRight size={14} /><strong>{pageTitles[view]?.[0] || 'Visão geral'}</strong></div>
           <div className="topbar-actions">
-            <span className="save-indicator"><span className="save-dot" />Salvamento automático</span>
+            <span className={`save-indicator ${cloudStatus === 'error' ? 'save-indicator-error' : ''}`} title={cloudError || cloudStatusText}><span className={`save-dot ${cloudStatus === 'error' ? 'save-dot-error' : ''}`} />{cloudStatusText}</span>
             <button className="icon-button theme-button" aria-label={data.theme === 'dark' ? 'Ativar tema claro' : 'Ativar tema escuro'} title={data.theme === 'dark' ? 'Tema claro' : 'Tema escuro'} onClick={toggleTheme}>{data.theme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}</button>
             <button className="button button-primary top-log-button" onClick={() => setSessionModal({ date: todayKey, subjectId: 'portugues', track: 'all', minutes: 45, note: '' })}><Plus size={17} /> Registrar estudo</button>
           </div>
@@ -475,11 +748,85 @@ function App() {
         </div>
       </main>
 
-      {sessionModal && <SessionModal initial={sessionModal} onClose={() => setSessionModal(null)} onSave={saveSession} />}
+      {sessionModal && <SessionModal initial={sessionModal} onClose={() => setSessionModal(null)} onSave={saveSession} storageLabel={supabaseConfigured && session ? 'Sincronização automática com a nuvem' : 'Salvo neste navegador'} />}
       <input ref={importInputRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importBackup} />
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
     </div>
   );
+}
+
+function CloudStartupScreen({ title, text, error = false, onRetry, onSignOut }) {
+  return <main className="cloud-startup-screen">
+    <section className="cloud-startup-card">
+      <div className={`auth-logo-mark ${error ? 'auth-logo-error' : ''}`}><GraduationCap size={28} /></div>
+      <span className="auth-eyebrow">STUDYMAXIMIZER · SINCRONIZAÇÃO</span>
+      <h1>{title}</h1>
+      <p>{text}</p>
+      {!error && <div className="loading-pulse"><span /><span /><span /></div>}
+      {error && <div className="auth-action-row"><button className="button button-primary" onClick={onRetry}><RefreshCw size={16} /> Tentar novamente</button>{onSignOut && <button className="button button-secondary" onClick={onSignOut}>Sair da conta</button>}</div>}
+      <small>Se o problema continuar, confira se o script <code>supabase/schema.sql</code> foi executado no SQL Editor do projeto.</small>
+    </section>
+  </main>;
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+
+  const submit = async event => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      if (mode === 'signup') {
+        const { data: result, error: requestError } = await supabase.auth.signUp({
+          email: email.trim(), password,
+          options: { emailRedirectTo: window.location.href },
+        });
+        if (requestError) throw requestError;
+        if (result?.session) {
+          setMessage('Conta criada. Abrindo seu espaço de estudos…');
+        } else {
+          setMessage('Conta criada. Confira sua caixa de entrada e confirme o e-mail antes de entrar.');
+        }
+      } else {
+        const { error: requestError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (requestError) throw requestError;
+        setMessage('Login confirmado. Carregando seu progresso…');
+      }
+    } catch (requestError) {
+      const raw = requestError?.message || 'Não foi possível concluir a solicitação.';
+      const lower = raw.toLowerCase();
+      if (lower.includes('invalid login credentials')) setError('E-mail ou senha incorretos. Confira os dados e tente novamente.');
+      else if (lower.includes('email not confirmed')) setError('Seu e-mail ainda não foi confirmado. Abra a mensagem enviada pelo Supabase e confirme a conta.');
+      else if (lower.includes('user already registered')) setError('Já existe uma conta com esse e-mail. Entre em vez de criar outra.');
+      else if (lower.includes('password should be at least')) setError('A senha precisa ter pelo menos 6 caracteres.');
+      else setError(raw);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <main className="auth-screen">
+    <section className="auth-card">
+      <div className="auth-brand"><div className="auth-logo-mark"><GraduationCap size={29} /></div><div><strong>StudyMaximizer</strong><span>STUDY WITH PURPOSE</span></div></div>
+      <div className="auth-intro"><span className="auth-eyebrow">SUA PREPARAÇÃO, EM QUALQUER LUGAR</span><h1>{mode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}</h1><p>{mode === 'login' ? 'Acesse seu cronograma, progresso e histórico sincronizados.' : 'Crie sua conta para manter seus estudos sincronizados entre dispositivos.'}</p></div>
+      <form className="auth-form" onSubmit={submit}>
+        <label className="auth-field"><span>E-mail</span><div><Mail size={18} /><input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} placeholder="voce@exemplo.com" /></div></label>
+        <label className="auth-field"><span>Senha</span><div><LockKeyhole size={18} /><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={6} required value={password} onChange={event => setPassword(event.target.value)} placeholder="Pelo menos 6 caracteres" /></div></label>
+        {error && <div className="auth-feedback auth-feedback-error"><CircleAlert size={17} /><span>{error}</span></div>}
+        {message && <div className="auth-feedback auth-feedback-success"><CheckCircle2 size={17} /><span>{message}</span></div>}
+        <button className="button button-primary auth-submit" type="submit" disabled={busy}>{busy ? <RefreshCw size={17} className="auth-spinner" /> : <ArrowRight size={17} />}{busy ? 'Processando…' : mode === 'login' ? 'Entrar e sincronizar' : 'Criar conta'}</button>
+      </form>
+      <div className="auth-switch"><span>{mode === 'login' ? 'Ainda não tem conta?' : 'Já tem uma conta?'}</span><button type="button" onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setMessage(''); }}>{mode === 'login' ? 'Criar conta' : 'Fazer login'}</button></div>
+      <div className="auth-security-note"><ShieldCheck size={17} /><span>Seus registros são privados. O banco aplica regras para que cada conta acesse apenas os próprios dados.</span></div>
+    </section>
+  </main>;
 }
 
 function StatCard({ label, value, suffix, foot, Icon: CardIcon, tone = 'blue', meter }) {
@@ -726,7 +1073,7 @@ function EmptyState({ Icon: EmptyIcon, title, text, actionLabel, action }) {
   return <div className="empty-state"><div className="empty-icon"><EmptyIcon size={24} /></div><h3>{title}</h3><p>{text}</p>{action && <button className="button button-secondary" onClick={action}>{actionLabel || 'Continuar'} <ArrowRight size={15} /></button>}</div>;
 }
 
-function SettingsPage({ data, updateData, exportBackup, importBackup }) {
+function SettingsPage({ data, updateData, exportBackup, importBackup, supabaseConfigured, session, cloudStatus, cloudError, onSignOut, onRetrySync }) {
   const [hours, setHours] = useState(String(data.targetHours || PLANNED_HOURS_PER_WEEK));
   useEffect(() => setHours(String(data.targetHours || PLANNED_HOURS_PER_WEEK)), [data.targetHours]);
   const saveHours = () => {
@@ -734,15 +1081,16 @@ function SettingsPage({ data, updateData, exportBackup, importBackup }) {
     updateData(previous => ({ ...previous, targetHours: parsed }));
   };
   return <div className="page-stack settings-stack">
+    <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><Database size={21} /></div><div><h3>Conta e sincronização</h3><p>{supabaseConfigured ? 'Sua preparação fica associada à sua conta e pode ser acessada em outros dispositivos.' : 'A conexão com o Supabase ainda não foi configurada nesta versão do site.'}</p></div></div>{supabaseConfigured ? <div className="cloud-account-panel"><div className="cloud-account-status"><span className={`cloud-status-indicator ${cloudStatus === 'error' ? 'error' : cloudStatus === 'synced' ? 'online' : ''}`} /><div><strong>{session?.user?.email || 'Conta autenticada'}</strong><span>{({ loading: 'Carregando seus dados…', saving: 'Salvando alterações na nuvem…', synced: 'Tudo sincronizado', error: 'Atenção: sincronização com erro', connecting: 'Conectando…' })[cloudStatus] || 'Conectado'}</span></div></div>{cloudError && <div className="cloud-inline-error"><CircleAlert size={16} />{cloudError}</div>}<div className="cloud-account-actions"><button className="button button-secondary" onClick={onRetrySync}><RefreshCw size={16} /> Tentar sincronizar</button><button className="button button-secondary" onClick={onSignOut}><LockKeyhole size={16} /> Sair da conta</button></div></div> : <div className="cloud-setup-instructions"><p>Para ativar a sincronização entre computadores:</p><ol><li>Execute <code>supabase/schema.sql</code> no SQL Editor do seu projeto Supabase.</li><li>Configure <code>VITE_SUPABASE_URL</code> e <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> como variáveis no GitHub Actions.</li><li>Publique novamente pelo workflow do GitHub Pages e crie sua conta no StudyMaximizer.</li></ol><p>Para testar localmente, copie <code>.env.example</code> para <code>.env.local</code> e informe os mesmos valores.</p></div>}</section>
     <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><Target size={21} /></div><div><h3>Meta semanal de estudo</h3><p>O cronograma atual foi planejado para 15 horas. Altere a meta se sua disponibilidade mudar.</p></div></div><div className="settings-control-row"><label htmlFor="target-hours">Horas líquidas por semana</label><div className="hours-control"><input id="target-hours" type="number" min="1" max="60" step="0.5" value={hours} onChange={event => setHours(event.target.value)} /><span>horas</span><button className="button button-primary" onClick={saveHours}>Salvar meta</button></div></div><div className="setting-hint"><CircleHelp size={15} /> Alterar a meta ajusta os indicadores de desempenho; os blocos do cronograma somam 15 horas e podem ser reorganizados manualmente conforme sua rotina.</div></section>
     <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><Moon size={21} /></div><div><h3>Aparência</h3><p>Escolha um tema confortável para estudar de dia ou à noite.</p></div></div><div className="theme-options"><button className={`theme-option ${data.theme === 'light' ? 'selected' : ''}`} onClick={() => updateData(previous => ({ ...previous, theme: 'light' }))}><div className="theme-preview theme-preview-light"><div /><span /></div><div><strong>Tema claro</strong><small>Leve e luminoso</small></div>{data.theme === 'light' && <CheckCircle2 size={19} />}</button><button className={`theme-option ${data.theme === 'dark' ? 'selected' : ''}`} onClick={() => updateData(previous => ({ ...previous, theme: 'dark' }))}><div className="theme-preview theme-preview-dark"><div /><span /></div><div><strong>Tema escuro</strong><small>Reduz a luminosidade</small></div>{data.theme === 'dark' && <CheckCircle2 size={19} />}</button></div></section>
-    <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><LockKeyhole size={21} /></div><div><h3>Dados e backup</h3><p>O progresso é salvo no armazenamento local deste navegador, não na nuvem.</p></div></div><div className="backup-actions"><div className="backup-action"><div className="backup-action-icon"><Download size={20} /></div><div><strong>Exportar backup</strong><p>Baixe um arquivo JSON com seus registros, atividades e conteúdos marcados.</p></div><button className="button button-secondary" onClick={exportBackup}><ArrowDownToLine size={16} /> Exportar</button></div><div className="backup-action"><div className="backup-action-icon"><Upload size={20} /></div><div><strong>Importar backup</strong><p>Restaure dados de um arquivo JSON previamente exportado do StudyMaximizer.</p></div><button className="button button-secondary" onClick={importBackup}><Upload size={16} /> Importar</button></div></div><div className="backup-warning"><CircleAlert size={16} /><span>Importar um backup substitui os dados atuais. Exporte uma cópia antes de restaurar outro arquivo.</span></div></section>
+    <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><LockKeyhole size={21} /></div><div><h3>Dados e backup</h3><p>{supabaseConfigured ? 'O progresso é sincronizado com sua conta; o backup continua disponível como cópia de segurança.' : 'O progresso é salvo no armazenamento local deste navegador, não na nuvem.'}</p></div></div><div className="backup-actions"><div className="backup-action"><div className="backup-action-icon"><Download size={20} /></div><div><strong>Exportar backup</strong><p>Baixe um arquivo JSON com seus registros, atividades e conteúdos marcados.</p></div><button className="button button-secondary" onClick={exportBackup}><ArrowDownToLine size={16} /> Exportar</button></div><div className="backup-action"><div className="backup-action-icon"><Upload size={20} /></div><div><strong>Importar backup</strong><p>Restaure dados de um arquivo JSON previamente exportado do StudyMaximizer.</p></div><button className="button button-secondary" onClick={importBackup}><Upload size={16} /> Importar</button></div></div><div className="backup-warning"><CircleAlert size={16} /><span>Importar um backup substitui os dados atuais. Exporte uma cópia antes de restaurar outro arquivo.</span></div></section>
     <section className="settings-card panel sources-panel"><div className="settings-card-heading"><div className="settings-icon"><FileText size={21} /></div><div><h3>Editais e programas de referência</h3><p>O conteúdo é uma matriz de partida baseada em editais anteriores, não uma previsão dos próximos editais.</p></div></div><div className="source-list">{SOURCES.map((source, index) => <a href={source.url} target="_blank" rel="noreferrer" key={source.url} className="source-item"><span className="source-index">{String(index + 1).padStart(2, '0')}</span><span className="source-copy"><strong>{source.name}</strong><small>{source.note}</small></span><ExternalLink size={17} /></a>)}</div><div className="source-note"><CircleHelp size={16} /><p>Ao sair edital novo, compare o conteúdo programático, os pesos, a banca, a redação e os critérios eliminatórios. Retire ou acrescente tópicos conforme a publicação oficial e suas retificações.</p></div></section>
-    <section className="settings-card panel about-panel"><div className="settings-card-heading"><div className="settings-icon"><GraduationCap size={21} /></div><div><h3>Sobre o StudyMaximizer</h3><p>Uma ferramenta pessoal de planejamento, execução e revisão para concursos.</p></div></div><div className="about-feature-grid"><div><CheckCircle2 size={17} /><span>Progresso por disciplina, assunto e subassunto</span></div><div><CheckCircle2 size={17} /><span>Trilhas independentes por cargo</span></div><div><CheckCircle2 size={17} /><span>Gamificação com desenvolvimento e frequência</span></div><div><CheckCircle2 size={17} /><span>Curva de acertos baseada em registros reais</span></div><div><CheckCircle2 size={17} /><span>Backup portátil, sem conta obrigatória</span></div><div><CheckCircle2 size={17} /><span>Compatível com publicação estática no GitHub Pages</span></div></div></section>
+    <section className="settings-card panel about-panel"><div className="settings-card-heading"><div className="settings-icon"><GraduationCap size={21} /></div><div><h3>Sobre o StudyMaximizer</h3><p>Uma ferramenta pessoal de planejamento, execução e revisão para concursos.</p></div></div><div className="about-feature-grid"><div><CheckCircle2 size={17} /><span>Progresso por disciplina, assunto e subassunto</span></div><div><CheckCircle2 size={17} /><span>Trilhas independentes por cargo</span></div><div><CheckCircle2 size={17} /><span>Gamificação com desenvolvimento e frequência</span></div><div><CheckCircle2 size={17} /><span>Curva de acertos baseada em registros reais</span></div><div><CheckCircle2 size={17} /><span>Backup JSON e sincronização na nuvem quando configurada</span></div><div><CheckCircle2 size={17} /><span>Compatível com publicação estática no GitHub Pages</span></div></div></section>
   </div>;
 }
 
-function SessionModal({ initial, onClose, onSave }) {
+function SessionModal({ initial, onClose, onSave, storageLabel }) {
   const [subjectId, setSubjectId] = useState(initial.subjectId || 'portugues');
   const [track, setTrack] = useState(initial.track || 'all');
   const [date, setDate] = useState(initial.date || dateKey(new Date()));
@@ -765,7 +1113,7 @@ function SessionModal({ initial, onClose, onSave }) {
     if (correctValue > questionValue) { setError('A quantidade de acertos não pode ser maior que a quantidade de questões.'); return; }
     onSave({ id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `session-${Date.now()}`, date, subjectId, track, minutes: minuteValue, questions: questionValue, correct: correctValue, note: note.trim() });
   };
-  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section className="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-modal-title"><div className="modal-heading"><div className="modal-title-icon"><NotebookPen size={21} /></div><div><span className="section-kicker">REGISTRO DE ATIVIDADE</span><h2 id="session-modal-title">Registrar sessão de estudo</h2><p>Registre o que aconteceu de fato. Esses dados alimentam seu histórico e a curva de acertos.</p></div><button className="icon-button" aria-label="Fechar" onClick={onClose}><X size={20} /></button></div><form onSubmit={submit} className="session-form"><div className="form-grid"><label className="form-field form-field-wide"><span>Disciplina</span><select value={subjectId} onChange={event => setSubjectId(event.target.value)}>{SUBJECTS.map(subject => <option key={subject.id} value={subject.id}>{subject.title}</option>)}</select></label><label className="form-field"><span>Trilha / cargo</span><select value={track} onChange={event => setTrack(event.target.value)}><option value="all">Base comum / avulsa</option>{TRACKS.map(item => <option key={item.id} value={item.id}>{item.short}</option>)}</select></label><label className="form-field"><span>Data do estudo</span><input type="date" value={date} onChange={event => setDate(event.target.value)} required /></label><label className="form-field"><span>Tempo efetivo (minutos)</span><input type="number" min="1" max="1440" value={minutes} onChange={event => setMinutes(event.target.value)} required /></label><label className="form-field"><span>Questões resolvidas</span><input type="number" min="0" max="10000" value={questions} onChange={event => setQuestions(event.target.value)} placeholder="Ex.: 20" /></label><label className="form-field"><span>Acertos</span><input type="number" min="0" max="10000" value={correct} onChange={event => setCorrect(event.target.value)} placeholder="Ex.: 14" /></label><label className="form-field form-field-wide"><span>Observação / assunto estudado</span><textarea value={note} onChange={event => setNote(event.target.value)} placeholder="Ex.: interpretação de texto — errei inferências e conectivos" rows="3" /></label></div>{error && <div className="form-error"><CircleAlert size={15} />{error}</div>}<div className="modal-footer"><span><LockKeyhole size={14} /> Salvo apenas neste navegador</span><div><button type="button" className="button button-secondary" onClick={onClose}>Cancelar</button><button type="submit" className="button button-primary"><Check size={16} /> Salvar sessão</button></div></div></form></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section className="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-modal-title"><div className="modal-heading"><div className="modal-title-icon"><NotebookPen size={21} /></div><div><span className="section-kicker">REGISTRO DE ATIVIDADE</span><h2 id="session-modal-title">Registrar sessão de estudo</h2><p>Registre o que aconteceu de fato. Esses dados alimentam seu histórico e a curva de acertos.</p></div><button className="icon-button" aria-label="Fechar" onClick={onClose}><X size={20} /></button></div><form onSubmit={submit} className="session-form"><div className="form-grid"><label className="form-field form-field-wide"><span>Disciplina</span><select value={subjectId} onChange={event => setSubjectId(event.target.value)}>{SUBJECTS.map(subject => <option key={subject.id} value={subject.id}>{subject.title}</option>)}</select></label><label className="form-field"><span>Trilha / cargo</span><select value={track} onChange={event => setTrack(event.target.value)}><option value="all">Base comum / avulsa</option>{TRACKS.map(item => <option key={item.id} value={item.id}>{item.short}</option>)}</select></label><label className="form-field"><span>Data do estudo</span><input type="date" value={date} onChange={event => setDate(event.target.value)} required /></label><label className="form-field"><span>Tempo efetivo (minutos)</span><input type="number" min="1" max="1440" value={minutes} onChange={event => setMinutes(event.target.value)} required /></label><label className="form-field"><span>Questões resolvidas</span><input type="number" min="0" max="10000" value={questions} onChange={event => setQuestions(event.target.value)} placeholder="Ex.: 20" /></label><label className="form-field"><span>Acertos</span><input type="number" min="0" max="10000" value={correct} onChange={event => setCorrect(event.target.value)} placeholder="Ex.: 14" /></label><label className="form-field form-field-wide"><span>Observação / assunto estudado</span><textarea value={note} onChange={event => setNote(event.target.value)} placeholder="Ex.: interpretação de texto — errei inferências e conectivos" rows="3" /></label></div>{error && <div className="form-error"><CircleAlert size={15} />{error}</div>}<div className="modal-footer"><span><LockKeyhole size={14} /> {storageLabel || 'Salvo neste navegador'}</span><div><button type="button" className="button button-secondary" onClick={onClose}>Cancelar</button><button type="submit" className="button button-primary"><Check size={16} /> Salvar sessão</button></div></div></form></section></div>;
 }
 
 export default App;

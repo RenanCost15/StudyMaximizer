@@ -1,68 +1,108 @@
-# StudyMaximizer — painel de preparação para concursos
+# StudyMaximizer — React + Supabase
 
-Aplicação React + Vite para planejar estudos, acompanhar conteúdo programático, registrar sessões, visualizar a curva de acertos e acompanhar a gamificação. O projeto está preparado para publicação no **GitHub Pages via GitHub Actions**.
+Aplicação React/Vite para acompanhar cronograma, conteúdo programático, questões, horas de estudo, curva de aprendizagem e gamificação. Esta versão pode sincronizar os dados entre computadores usando Supabase Auth, PostgreSQL e Realtime.
 
-## Importante: não publique os arquivos-fonte diretamente
+## 1. Criar a tabela segura no Supabase
 
-Se a página ficar branca e o console mostrar `Failed to load resource: ... /src/main.jsx (404)`, o GitHub Pages provavelmente está servindo o `index.html` de desenvolvimento em vez do site compilado. **React/Vite precisa ser compilado antes da publicação.** Não resolva apenas trocando o caminho de `main.jsx`.
+1. Abra o painel do seu projeto Supabase.
+2. Entre em **SQL Editor** e crie uma nova consulta.
+3. Abra `supabase/schema.sql` neste projeto, copie todo o conteúdo e cole no SQL Editor.
+4. Clique em **Run**.
+5. Confirme em **Table Editor** que existe a tabela `public.studymaximizer_user_data`.
 
-## Publicação correta no GitHub Pages
+O SQL cria uma linha privada por usuário, ativa Row Level Security (RLS) e cria políticas que só permitem que cada conta leia ou altere a própria linha. Também inclui a tabela na publicação `supabase_realtime` para permitir atualizações em tempo real. Não é necessário criar a tabela manualmente.
 
-1. Extraia todos os arquivos deste ZIP.
-2. Envie o conteúdo da pasta `StudyMaximizer` para a raiz de um repositório GitHub. Preserve a pasta oculta `.github/workflows/deploy.yml` e a pasta `src/`.
-3. No repositório, abra **Settings → Pages**.
-4. Em **Build and deployment → Source**, selecione **GitHub Actions** — não selecione **Deploy from a branch**.
-5. Confirme que a branch de publicação é `main` (ou ajuste `.github/workflows/deploy.yml` para a branch que você realmente usa).
-6. Faça um commit/push para `main`, ou abra **Actions → Deploy StudyMaximizer to GitHub Pages → Run workflow**.
-7. Abra a aba **Actions** e aguarde a execução ficar verde/sucesso. Só então acesse a URL de Pages exibida em **Settings → Pages**.
-8. Recarregue a página com `Ctrl + F5` para limpar recursos antigos em cache.
+## 2. Copiar a URL e a chave pública do projeto
 
-O workflow executa `npm install`, `npm run build` e publica a pasta `dist/`. O `vite.config.js` usa `base: './'`, para que os arquivos compilados funcionem em URLs do GitHub Pages com nome de repositório.
+No painel Supabase, abra **Connect** ou **Project Settings → API Keys**. Copie:
 
-### Se ainda aparecer uma página branca
+- **Project URL**;
+- **Publishable key** (ou a chave pública `anon` legada, caso seja a opção disponibilizada no seu projeto).
 
-- Em **Actions**, abra a execução mais recente. Se estiver vermelha, abra a etapa `Build` e copie o erro completo.
-- Verifique se `Settings → Pages → Source` está em **GitHub Actions**.
-- Verifique se o repositório contém `.github/workflows/deploy.yml`, `package.json`, `vite.config.js`, `index.html` e `src/main.jsx`.
-- Verifique se o workflow está configurado para a branch que recebeu o commit (`main` por padrão).
-- O erro 404 de `favicon.ico` era apenas um ícone ausente e não impedia o React de renderizar. Esta versão inclui `public/favicon.svg`.
+**Não use nem compartilhe a `service_role`/secret key.** A chave publishable é destinada ao frontend; o isolamento entre usuários é imposto pelas políticas RLS no banco.
 
-## Executar localmente
+## 3. Configurar execução local (opcional)
 
-Requisitos: Node.js 20 ou superior e npm.
+Na raiz do projeto, copie `.env.example` para `.env.local` e substitua os valores de exemplo:
+
+```dotenv
+VITE_SUPABASE_URL=https://SEU_PROJECT_REF.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_SUA_CHAVE_PUBLICA
+```
+
+Depois execute:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Para validar a versão de produção:
+Como alternativa no PowerShell do Windows:
 
-```bash
-npm run build
-npm run preview
+```powershell
+Copy-Item .env.example .env.local
+npm install
+npm run dev
 ```
 
-## O que está incluído
+O arquivo `.env.local` está ignorado pelo Git e não deve ser enviado ao repositório. O projeto continuará em modo local se as duas variáveis não estiverem configuradas.
 
-- **Painel geral:** horas registradas, tarefas concluídas, questões, frequência, conteúdos acompanhados e gamificação.
-- **Cronograma semanal:** segunda a sábado, com 2h30 planejadas por dia e navegação entre semanas.
-- **Mapa de conteúdo detalhado:** disciplina → assunto → subassuntos individuais, busca, filtros por trilha e estado de progresso.
-- **Progresso por cargo:** Administrativo, Técnico de TI, Técnico Bancário Novo (CAIXA), TBN-TI (CAIXA) e Analista Bancário 1 (Banco do Nordeste).
-- **Desempenho:** histórico de sessões, tempo estudado, questões, acertos por disciplina e curva de aprendizagem semanal.
-- **Gamificação:** cinco níveis, XP por tempo efetivo registrado, tarefas, frequência, volume de questões, metas semanais e melhora de acertos.
-- **Tema claro/escuro**, responsividade, ícones Lucide e favicon próprio.
-- **Backup JSON:** exportação e importação dos dados locais.
+## 4. Configurar o GitHub Pages
 
-## Salvamento
+O site é compilado pelo GitHub Actions. Para fornecer as variáveis durante o build:
 
-Os dados ficam no `localStorage` do navegador e não são sincronizados automaticamente entre dispositivos. Use as opções de backup nas configurações para exportar e restaurar seus registros.
+1. Abra seu repositório no GitHub.
+2. Entre em **Settings → Secrets and variables → Actions → Variables**.
+3. Clique em **New repository variable** e crie estas duas variáveis, com os nomes exatos:
+   - `VITE_SUPABASE_URL` — valor da Project URL do Supabase;
+   - `VITE_SUPABASE_PUBLISHABLE_KEY` — valor da Publishable key.
+4. Em **Settings → Pages → Build and deployment → Source**, selecione **GitHub Actions**.
+5. Faça commit/push dos arquivos atualizados para a branch configurada no workflow (por padrão, `main`).
+6. Abra **Actions** e confirme que `Deploy StudyMaximizer to GitHub Pages` terminou com sucesso.
+
+As variáveis `VITE_*` são incorporadas no bundle durante o build e ficam visíveis no navegador. Isso é esperado para a Project URL e a publishable key. **Nunca coloque uma chave secreta ou `service_role` em variáveis `VITE_*`.** O acesso aos registros é protegido por autenticação e RLS.
+
+## 5. Configurar os redirecionamentos de autenticação
+
+No Supabase, abra **Authentication → URL Configuration**:
+
+- Configure **Site URL** para o endereço do seu site no GitHub Pages, por exemplo `https://SEU-USUARIO.github.io/SEU-REPOSITORIO/`.
+- Em **Redirect URLs**, permita o mesmo endereço com `/**` ao final, e `http://localhost:5173/**` para desenvolvimento local.
+- Salve as alterações.
+
+Substitua os exemplos acima pelo endereço real do seu repositório. Se a confirmação de e-mail estiver ativa no Supabase, ao criar uma conta será necessário abrir o e-mail de confirmação antes de fazer login.
+
+## 6. Primeiro login e migração dos dados locais
+
+1. Abra o StudyMaximizer publicado.
+2. Crie uma conta com seu e-mail e uma senha de pelo menos seis caracteres, ou entre em uma conta existente.
+3. Na primeira autenticação, se a conta ainda não tiver registro na nuvem, o StudyMaximizer tenta migrar o progresso local deste navegador para a conta.
+4. Espere o indicador mudar para **Sincronizado na nuvem** antes de fechar a aba.
+5. Entre com a mesma conta em outro computador; o cronograma, tarefas, sessões, tópicos, meta, XP e tema serão carregados da nuvem.
+
+Se já existir uma linha para a conta na nuvem, os dados da nuvem serão tratados como a versão principal e substituirão o estado exibido na sessão. O cache local por conta e o backup JSON são mantidos como recursos complementares. Por segurança, uma conta diferente no mesmo navegador não deve importar automaticamente o estado de outra conta.
+
+## Como funciona a sincronização
+
+- As mudanças ficam em cache local para manter a interface responsiva e são enviadas à nuvem automaticamente após uma pequena pausa.
+- Supabase Realtime propaga atualizações para outras máquinas conectadas, sem precisar recarregar a página.
+- A sincronização depende de conexão ativa com a internet. Se ficar offline, não feche a aba sem verificar que as alterações voltaram a sincronizar.
+- Se duas máquinas editarem exatamente o mesmo campo ao mesmo tempo, pode haver conflito. O app combina listas de sessões e estados de conteúdo distintos, mas não substitui um sistema transacional de colaboração multiusuário. Para uso pessoal, evite editar a mesma informação simultaneamente em dois dispositivos.
+- Continue usando **Exportar backup** em Configurações e fontes como cópia adicional de segurança.
+
+## Problemas comuns
+
+**A tela fica em “Não foi possível carregar seus dados”**: confirme se o SQL foi executado e se o nome da tabela é exatamente `studymaximizer_user_data`. O texto de erro aparece na tela de carregamento.
+
+**O site funciona em modo local mesmo após configurar o Supabase**: confira se as duas variáveis foram salvas em **Settings → Secrets and variables → Actions → Variables**. Execute novamente o workflow após criar ou alterar variáveis; elas só são injetadas no próximo build.
+
+**A confirmação de e-mail retorna erro de redirecionamento**: revise **Authentication → URL Configuration** e adicione a URL exata do GitHub Pages em Redirect URLs.
+
+**O build falha**: abra **Actions**, selecione a execução vermelha e consulte o log da etapa `Build`.
 
 ## Conteúdo programático
 
-O mapa é uma matriz preliminar de preparação inspirada em editais anteriores, não uma garantia de que todos os tópicos serão cobrados em concursos futuros. Quando os editais forem publicados, ajuste as trilhas aos conteúdos oficiais, às retificações, aos pesos, à banca e às regras eliminatórias.
-
-Fontes de referência:
+A matriz é uma base preliminar inspirada em editais anteriores, não uma previsão de que todos os tópicos serão cobrados nos próximos concursos. Ajuste os tópicos aos futuros editais, pesos, banca e critérios eliminatórios.
 
 - [UFRN / COMPERVE — programas de estudo técnico-administrativos](https://comperve.ufrn.br/conteudo/concursos/ufrn_202287/programas.php)
 - [UFRN / COMPERVE — programas de estudo de 2025](https://comperve.ufrn.br/conteudo/concursos/ufrn_2025_22_23/programas.php)
