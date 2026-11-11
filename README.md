@@ -158,3 +158,12 @@ O template usa `{{ .ConfirmationURL }}`, variável oficial do Supabase. A mensag
 - No login, o Supabase retorna uma falha genérica para credenciais inválidas; o cliente não tenta consultar a tabela interna de usuários para descobrir se o e-mail existe. Isso evita expor a lista de contas por tentativas de login. A interface oferece cadastro e recuperação de senha como próximos passos.
 - Quando o Supabase permite reconhecer uma tentativa de cadastro duplicada, o StudyMaximizer informa que o e-mail já está associado a uma conta e oferece as ações de reenviar confirmação e redefinir a senha. O estado de confirmação não é inferido por uma consulta administrativa no navegador. Se o login retornar explicitamente `email_not_confirmed`, a mensagem informa que a confirmação está pendente.
 - Para manter as mensagens de autenticação precisas e consistentes, português e inglês usam um catálogo de traduções revisado em `src/i18n.js`. Uma API de tradução automática não é chamada diretamente do navegador: isso pode expor textos do aplicativo, criar dependência de terceiros e traduzir incorretamente mensagens de segurança. Idiomas adicionais podem ser adicionados ao catálogo; uma API de tradução opcional deve ser chamada por uma Edge Function com credenciais mantidas no servidor.
+
+
+## Atualização automática da versão
+
+A versão base do projeto está em `package.json` e `src/version.js`. Em toda publicação iniciada por um push na branch `main`, o workflow incrementa automaticamente a versão patch (por exemplo, `2.4.0` → `2.4.1`), compila a interface com essa versão e grava a alteração no repositório. A versão exibida no rodapé lateral acompanha o código publicado.
+
+## Navegação e configurações pessoais
+
+O logotipo StudyMaximizer e o breadcrumb superior retornam à Visão geral. O cartão da conta abre Configurações pessoais. Alterações de nome, nome de usuário, data de nascimento e foto exigem confirmação da senha atual. O nome de usuário é validado pela função SQL `is_studymaximizer_username_available`; mantenha o script `supabase/schema.sql` aplicado no projeto.

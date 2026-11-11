@@ -15,6 +15,7 @@ import { SUBJECTS, TRACKS, SOURCES, flattenSubject, slug } from './data/syllabus
 import { WEEK_PLAN, PLANNED_HOURS_PER_WEEK, PLANNED_STUDY_DAYS } from './data/schedule.js';
 import { supabase, supabaseConfigured, CLOUD_TABLE, PROFILE_TABLE, AVATAR_BUCKET } from './lib/supabase.js';
 import { detectInitialLocale, LANGUAGE_STORAGE_KEY, SUPPORTED_LOCALES, translate, translateAuthError, setActiveLocale, getActiveLocale } from './i18n.js';
+import { APP_VERSION } from './version.js';
 
 const STORAGE_KEY = 'studymaximizer-react-v2';
 const CLOUD_MIGRATION_OWNER_KEY = 'studymaximizer-cloud-migration-owner-v1';
@@ -420,7 +421,7 @@ function App() {
       });
       const { data: row, error } = await supabase
         .from(PROFILE_TABLE)
-        .select('user_id, username, full_name, date_of_birth, avatar_path')
+        .select('user_id, username, full_name, date_of_birth, avatar_path, updated_at')
         .eq('user_id', user.id)
         .maybeSingle();
       if (!alive) return;
@@ -452,7 +453,7 @@ function App() {
                 .from(PROFILE_TABLE)
                 .update({ avatar_path: path, updated_at: new Date().toISOString() })
                 .eq('user_id', user.id)
-                .select('user_id, username, full_name, date_of_birth, avatar_path')
+                .select('user_id, username, full_name, date_of_birth, avatar_path, updated_at')
                 .single();
               if (!updateError) {
                 nextProfile = updatedRow;
@@ -792,6 +793,7 @@ function App() {
     tracks: [tx('Progresso por cargo'), tx('Compare sua preparação para cada caminho e descubra onde concentrar esforço.')],
     performance: [tx('Desempenho e curva de aprendizagem'), tx('Acompanhe horas, questões, acertos e evolução ao longo das semanas.')],
     settings: [tx('Configurações e fontes'), tx('Personalize metas, proteja seus registros e consulte os editais de referência.')],
+    profile: [tx('Configurações pessoais'), tx('Gerencie seu nome, nome de usuário, data de nascimento e foto de perfil. Para salvar alterações, confirme sua senha atual.')],
   };
 
   const renderContent = () => {
@@ -808,6 +810,7 @@ function App() {
     />;
     if (view === 'tracks') return <TracksPage data={data} trackProgress={trackProgress} setSelectedTrack={setSelectedTrack} setView={setView} />;
     if (view === 'performance') return <PerformancePage data={data} stats={currentStats} selectedWeek={selectedWeek} trend={trend} deleteSession={deleteSession} openGeneralLog={() => setSessionModal({ date: todayKey, subjectId: 'portugues', track: 'all', minutes: 45, note: '' })} />;
+    if (view === 'profile') return <ProfileSettingsPage session={session} profile={profile} onProfileSaved={setProfile} notify={notify} tx={tx} />;
     if (view === 'settings') return <SettingsPage
       data={data} updateData={updateData} exportBackup={exportBackup}
       importBackup={() => importInputRef.current?.click()} supabaseConfigured={supabaseConfigured}
@@ -852,15 +855,17 @@ function App() {
       {mobileMenuOpen && <button className="mobile-scrim" aria-label={translate("Fechar menu")} onClick={() => setMobileMenuOpen(false)} />}
       <aside className={`sidebar ${mobileMenuOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-lockup">
-          <div className="brand-mark"><GraduationCap size={25} strokeWidth={2.2} /></div>
-          <div className="brand-name-wrap"><span className="brand-name">{translate("StudyMaximizer")}</span><span className="brand-caption">{translate('Estude com propósito', locale)}</span></div>
+          <button type="button" className="brand-home" aria-label={tx('Voltar à página inicial')} onClick={() => { setView('overview'); setMobileMenuOpen(false); }}>
+            <span className="brand-mark"><GraduationCap size={25} strokeWidth={2.2} /></span>
+            <span className="brand-name-wrap"><span className="brand-name">{translate("StudyMaximizer")}</span><span className="brand-caption">{translate('Estude com propósito', locale)}</span></span>
+          </button>
           <button className="icon-button sidebar-close" aria-label={translate("Fechar menu")} onClick={() => setMobileMenuOpen(false)}><X size={18} /></button>
         </div>
-        <div className="sidebar-profile" title={session?.user?.email || undefined}>
-          <div className="profile-avatar">{profile?.avatar_path && supabase ? <img src={supabase.storage.from(AVATAR_BUCKET).getPublicUrl(profile.avatar_path).data.publicUrl} alt={tx('Foto de perfil')} /> : <BookOpen size={20} />}</div>
-          <div className="profile-copy"><strong title={profile?.full_name || session?.user?.email || ''}>{profile?.full_name || session?.user?.user_metadata?.full_name || session?.user?.email || tx('Minha preparação')}</strong><span title={session?.user?.email || ''}>{profile?.username ? `@${profile.username}` : (supabaseConfigured ? tx('Conta sincronizada') : tx('Concursos 2027 · ciclo-base'))}</span></div>
+        <button type="button" className={`sidebar-profile ${view === 'profile' ? 'sidebar-profile-active' : ''}`} title={session?.user?.email || tx('Abrir configurações pessoais')} aria-label={tx('Abrir configurações pessoais')} onClick={() => { setView(session ? 'profile' : 'settings'); setMobileMenuOpen(false); }}>
+          <span className="profile-avatar">{profile?.avatar_path && supabase ? <img src={supabase.storage.from(AVATAR_BUCKET).getPublicUrl(profile.avatar_path).data.publicUrl} alt={tx('Foto de perfil')} /> : <BookOpen size={20} />}</span>
+          <span className="profile-copy"><strong title={profile?.full_name || session?.user?.email || ''}>{profile?.full_name || session?.user?.user_metadata?.full_name || session?.user?.email || tx('Minha preparação')}</strong><span title={session?.user?.email || ''}>{profile?.username ? `@${profile.username}` : (supabaseConfigured ? tx('Conta sincronizada') : tx('Concursos 2027 · ciclo-base'))}</span></span>
           <span className={`profile-dot ${cloudStatus === 'error' ? 'profile-dot-error' : ''}`} title={cloudStatusText} />
-        </div>
+        </button>
         <div className="nav-label">{tx('ACOMPANHAMENTO')}</div>
         <nav className="sidebar-nav" aria-label={tx('Navegação principal')}>
           {navItems.map(item => (
@@ -884,18 +889,18 @@ function App() {
             <button aria-label={translate("Editar meta")} className="tiny-icon-button" onClick={() => setView('settings')}><Settings2 size={14} /></button>
           </div>
           <div className="sidebar-note"><LockKeyhole size={14} /><span>{tx(supabaseConfigured ? 'Seus registros sincronizam com a nuvem.' : 'Seus registros ficam neste navegador.')}</span></div>
-          <div className="sidebar-footer">{translate("STUDYMAXIMIZER")}{' '}<span>{translate("·")}</span> {translate("V2.0")}</div>
+          <div className="sidebar-footer">{translate("STUDYMAXIMIZER")}{' '}<span>{translate("·")}</span> {`V${APP_VERSION}`}</div>
         </div>
       </aside>
 
       <main className="main-area">
         <div className="mobile-topbar">
           <button className="icon-button" aria-label={translate("Abrir menu")} onClick={() => setMobileMenuOpen(true)}><Menu size={21} /></button>
-          <div className="mobile-brand"><div className="brand-mark small"><GraduationCap size={19} /></div><span>{translate("StudyMaximizer")}</span></div>
+          <button type="button" className="mobile-brand mobile-brand-home" onClick={() => { setView('overview'); setMobileMenuOpen(false); }} aria-label={tx('Voltar à página inicial')}><span className="brand-mark small"><GraduationCap size={19} /></span><span>{translate("StudyMaximizer")}</span></button>
           <button className="icon-button" aria-label={effectiveTheme === 'dark' ? tx('Ativar tema claro') : tx('Ativar tema escuro')} onClick={toggleTheme}>{effectiveTheme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}</button>
         </div>
         <header className="topbar">
-          <div className="breadcrumbs"><span>{translate("StudyMaximizer")}</span><ChevronRight size={14} /><strong>{pageTitles[view]?.[0] || 'Visão geral'}</strong></div>
+          <nav className="breadcrumbs" aria-label={tx('Trilha de navegação')}><button type="button" className="breadcrumb-home" onClick={() => { setView('overview'); setMobileMenuOpen(false); }}>{translate("StudyMaximizer")}</button><ChevronRight size={14} /><strong>{pageTitles[view]?.[0] || tx('Visão geral')}</strong></nav>
           <div className="topbar-actions">
             <span className={`save-indicator ${cloudStatus === 'error' ? 'save-indicator-error' : ''}`} title={cloudError || cloudStatusText}><span className={`save-dot ${cloudStatus === 'error' ? 'save-dot-error' : ''}`} />{cloudStatusText}</span>
             <label className="locale-control" aria-label={tx('Idioma')}><Languages size={16} /><select value={locale} onChange={event => changeLocale(event.target.value)} aria-label={tx('Idioma')}>{SUPPORTED_LOCALES.map(item => <option value={item.code} key={item.code}>{item.shortLabel}</option>)}</select></label>
@@ -1477,7 +1482,176 @@ function SettingsPage({ data, updateData, exportBackup, importBackup, supabaseCo
     <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><Languages size={21} /></div><div><h3>{tx('Idioma da interface')}</h3><p>{tx('Escolha o idioma da interface. O conteúdo programático permanece em português para preservar os termos de estudo.')}</p></div></div><div className="settings-control-row"><label htmlFor="interface-language">{tx('Idioma')}</label><select id="interface-language" value={locale} onChange={event => onLocaleChange(event.target.value)}>{SUPPORTED_LOCALES.map(item => <option value={item.code} key={item.code}>{item.label}</option>)}</select></div></section>
     <section className="settings-card panel"><div className="settings-card-heading"><div className="settings-icon"><LockKeyhole size={21} /></div><div><h3>{translate("Dados e backup")}</h3><p>{translate(supabaseConfigured ? 'O progresso é sincronizado com sua conta; o backup continua disponível como cópia de segurança.' : 'O progresso é salvo no armazenamento local deste navegador, não na nuvem.')}</p></div></div><div className="backup-actions"><div className="backup-action"><div className="backup-action-icon"><Download size={20} /></div><div><strong>{translate("Exportar backup")}</strong><p>{translate("Baixe um arquivo JSON com seus registros, atividades e conteúdos marcados.")}</p></div><button className="button button-secondary" onClick={exportBackup}><ArrowDownToLine size={16} /> {translate("Exportar")}</button></div><div className="backup-action"><div className="backup-action-icon"><Upload size={20} /></div><div><strong>{translate("Importar backup")}</strong><p>{translate("Restaure dados de um arquivo JSON previamente exportado do StudyMaximizer.")}</p></div><button className="button button-secondary" onClick={importBackup}><Upload size={16} /> {translate("Importar")}</button></div></div><div className="backup-warning"><CircleAlert size={16} /><span>{translate("Importar um backup substitui os dados atuais. Exporte uma cópia antes de restaurar outro arquivo.")}</span></div></section>
     <section className="settings-card panel sources-panel"><div className="settings-card-heading"><div className="settings-icon"><FileText size={21} /></div><div><h3>{translate("Editais e programas de referência")}</h3><p>{translate("O conteúdo é uma matriz de partida baseada em editais anteriores, não uma previsão dos próximos editais.")}</p></div></div><div className="source-list">{SOURCES.map((source, index) => <a href={source.url} target="_blank" rel="noreferrer" key={source.url} className="source-item"><span className="source-index">{String(index + 1).padStart(2, '0')}</span><span className="source-copy"><strong>{source.name}</strong><small>{source.note}</small></span><ExternalLink size={17} /></a>)}</div><div className="source-note"><CircleHelp size={16} /><p>{translate("Ao sair edital novo, compare o conteúdo programático, os pesos, a banca, a redação e os critérios eliminatórios. Retire ou acrescente tópicos conforme a publicação oficial e suas retificações.")}</p></div></section>
-    <section className="settings-card panel about-panel"><div className="settings-card-heading"><div className="settings-icon"><GraduationCap size={21} /></div><div><h3>{translate("Sobre o StudyMaximizer")}</h3><p>{translate("Uma ferramenta pessoal de planejamento, execução e revisão para concursos.")}</p></div></div><div className="about-feature-grid"><div><CheckCircle2 size={17} /><span>{translate("Progresso por disciplina, assunto e subassunto")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Trilhas independentes por cargo")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Gamificação com desenvolvimento e frequência")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Curva de acertos baseada em registros reais")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Backup JSON e sincronização na nuvem quando configurada")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Compatível com publicação estática no GitHub Pages")}</span></div></div></section>
+    <section className="settings-card panel about-panel"><div className="settings-card-heading"><div className="settings-icon"><GraduationCap size={21} /></div><div><h3>{translate("Sobre o StudyMaximizer")}</h3><p>{translate("Uma ferramenta pessoal de planejamento, execução e revisão para concursos.")}</p></div></div><div className="about-feature-grid"><div><CheckCircle2 size={17} /><span>{translate("Progresso por disciplina, assunto e subassunto")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Trilhas independentes por cargo")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Gamificação com desenvolvimento e frequência")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Curva de acertos baseada em registros reais")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Backup JSON e sincronização na nuvem quando configurada")}</span></div><div><CheckCircle2 size={17} /><span>{translate("Compatível com publicação estática no GitHub Pages")}</span></div></div><div className="app-version-row"><span>{tx('Versão da aplicação')}</span><strong>V{APP_VERSION}</strong></div></section>
+  </div>;
+}
+
+function ProfileSettingsPage({ session, profile, onProfileSaved, notify, tx = value => value }) {
+  const user = session?.user;
+  const [fullName, setFullName] = useState(profile?.full_name || user?.user_metadata?.full_name || '');
+  const [username, setUsername] = useState(profile?.username || user?.user_metadata?.username || '');
+  const [dateOfBirth, setDateOfBirth] = useState(profile?.date_of_birth || user?.user_metadata?.date_of_birth || '');
+  const [avatarDataUrl, setAvatarDataUrl] = useState('');
+  const [passwordToConfirm, setPasswordToConfirm] = useState('');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+
+  useEffect(() => {
+    setFullName(profile?.full_name || user?.user_metadata?.full_name || '');
+    setUsername(profile?.username || user?.user_metadata?.username || '');
+    setDateOfBirth(profile?.date_of_birth || user?.user_metadata?.date_of_birth || '');
+    setAvatarDataUrl('');
+  }, [profile?.full_name, profile?.username, profile?.date_of_birth, profile?.avatar_path, user?.id]);
+
+  const avatarUrl = profile?.avatar_path && supabase
+    ? supabase.storage.from(AVATAR_BUCKET).getPublicUrl(profile.avatar_path).data.publicUrl
+    : '';
+  const normalizedUsername = username.trim().replace(/^@/, '').toLowerCase();
+  const changed = fullName.trim() !== String(profile?.full_name || user?.user_metadata?.full_name || '').trim()
+    || normalizedUsername !== String(profile?.username || user?.user_metadata?.username || '').trim().toLowerCase()
+    || dateOfBirth !== String(profile?.date_of_birth || user?.user_metadata?.date_of_birth || '')
+    || Boolean(avatarDataUrl);
+
+  const handleAvatarFile = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setAvatarBusy(true);
+    setError('');
+    try {
+      const dataUrl = await compressAvatarFile(file);
+      setAvatarDataUrl(dataUrl);
+    } catch (imageError) {
+      setError(tx(String(imageError?.message || '').startsWith('avatar_too_large') ? 'A foto deve ter no máximo 5 MB.' : String(imageError?.message || '').startsWith('avatar_invalid_type') ? 'Selecione um arquivo de imagem válido.' : 'Não foi possível preparar a foto. Tente outra imagem.'));
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const requestPasswordConfirmation = event => {
+    event.preventDefault();
+    setError('');
+    setPasswordError('');
+    if (!fullName.trim() || fullName.trim().length < 3) {
+      setError(tx('Informe seu nome completo, com nome e sobrenome.'));
+      return;
+    }
+    if (!USERNAME_PATTERN.test(normalizedUsername)) {
+      setError(tx('O nome de usuário deve ter de 3 a 24 caracteres: letras sem acento, números, ponto, hífen ou sublinhado.'));
+      return;
+    }
+    const birth = dateOfBirth ? new Date(`${dateOfBirth}T12:00:00`) : null;
+    if (!birth || Number.isNaN(birth.getTime()) || dateOfBirth > dateKey(new Date())) {
+      setError(tx('Informe uma data de nascimento válida, que não seja futura.'));
+      return;
+    }
+    if (!changed) {
+      notify('Não há alterações para salvar.');
+      return;
+    }
+    setConfirmOpen(true);
+  };
+
+  const confirmAndSave = async event => {
+    event.preventDefault();
+    setBusy(true);
+    setPasswordError('');
+    setError('');
+    let uploadedAvatarPath = null;
+    try {
+      if (!supabase || !user?.email || !passwordToConfirm) {
+        setPasswordError(tx('Informe sua senha atual para confirmar as alterações.'));
+        return;
+      }
+      const { error: authError } = await supabase.auth.signInWithPassword({ email: user.email, password: passwordToConfirm });
+      if (authError) {
+        setPasswordError(tx('Senha incorreta. Suas alterações não foram salvas.'));
+        return;
+      }
+
+      const oldUsername = String(profile?.username || user?.user_metadata?.username || '').trim().toLowerCase();
+      if (normalizedUsername !== oldUsername) {
+        const { data: available, error: availabilityError } = await supabase.rpc('is_studymaximizer_username_available', { candidate_username: normalizedUsername });
+        if (availabilityError) throw new Error('username_check_failed');
+        if (!available) throw new Error('username_unavailable');
+      }
+
+      let nextAvatarPath = profile?.avatar_path || null;
+      if (avatarDataUrl) {
+        const response = await fetch(avatarDataUrl);
+        const blob = await response.blob();
+        uploadedAvatarPath = `${user.id}/avatar-${Date.now()}.jpg`;
+        const { error: uploadError } = await supabase.storage.from(AVATAR_BUCKET).upload(uploadedAvatarPath, blob, {
+          upsert: false, contentType: 'image/jpeg', cacheControl: '3600',
+        });
+        if (uploadError) throw new Error('avatar_upload_failed');
+        nextAvatarPath = uploadedAvatarPath;
+      }
+
+      const { data: updatedProfile, error: profileError } = await supabase
+        .from(PROFILE_TABLE)
+        .update({
+          full_name: fullName.trim(),
+          username: normalizedUsername,
+          date_of_birth: dateOfBirth,
+          avatar_path: nextAvatarPath,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', user.id)
+        .select('user_id, username, full_name, date_of_birth, avatar_path, updated_at')
+        .single();
+      if (profileError) {
+        if (uploadedAvatarPath) await supabase.storage.from(AVATAR_BUCKET).remove([uploadedAvatarPath]).catch(() => {});
+        if (profileError.code === '23505') throw new Error('username_unavailable');
+        throw profileError;
+      }
+
+      const { error: metadataError } = await supabase.auth.updateUser({ data: {
+        full_name: fullName.trim(), username: normalizedUsername, date_of_birth: dateOfBirth,
+      } });
+      onProfileSaved(updatedProfile);
+      if (profile?.avatar_path && nextAvatarPath && profile.avatar_path !== nextAvatarPath) {
+        await supabase.storage.from(AVATAR_BUCKET).remove([profile.avatar_path]).catch(() => {});
+      }
+      setAvatarDataUrl('');
+      setConfirmOpen(false);
+      setPasswordToConfirm('');
+      if (metadataError) notify('Perfil salvo, mas alguns metadados da conta não puderam ser atualizados.');
+      else notify('Perfil atualizado com segurança.');
+    } catch (saveError) {
+      const message = String(saveError?.message || '').toLowerCase();
+      if (message === 'username_unavailable') setPasswordError(tx('Esse nome de usuário já está em uso. Escolha outro.'));
+      else if (message === 'username_check_failed') setPasswordError(tx('Não foi possível verificar o nome de usuário. Atualize o script supabase/schema.sql no projeto Supabase e tente novamente.'));
+      else if (message === 'avatar_upload_failed') setPasswordError(tx('Não foi possível enviar a foto de perfil. Tente novamente.'));
+      else setPasswordError(tx('Não foi possível salvar as alterações. Verifique a conexão e tente novamente.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="page-stack profile-settings-stack">
+    <section className="profile-settings-hero panel">
+      <div className="profile-settings-avatar">{avatarDataUrl ? <img src={avatarDataUrl} alt={tx('Prévia da foto de perfil')} /> : avatarUrl ? <img src={`${avatarUrl}${avatarUrl.includes('?') ? '&' : '?'}v=${encodeURIComponent(profile?.updated_at || profile?.avatar_path || 'profile')}`} alt={tx('Foto de perfil')} /> : <UserRound size={34} />}</div>
+      <div className="profile-settings-hero-copy"><span className="section-kicker">{tx('CONTA PESSOAL')}</span><h2>{profile?.full_name || user?.user_metadata?.full_name || tx('Meu perfil')}</h2><p>{user?.email || ''}</p><span className="profile-settings-hint"><ShieldCheck size={15} />{tx('As alterações só são aplicadas depois da confirmação da sua senha atual.')}</span></div>
+      <label className="button button-secondary profile-photo-button"><ImagePlus size={16} />{avatarBusy ? tx('Preparando imagem…') : tx('Alterar foto')}<input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleAvatarFile} disabled={avatarBusy || busy} /></label>
+    </section>
+
+    <section className="settings-card panel">
+      <div className="settings-card-heading"><div className="settings-icon"><UserRound size={21} /></div><div><h3>{tx('Dados pessoais')}</h3><p>{tx('Revise as informações associadas à sua conta StudyMaximizer.')}</p></div></div>
+      <form className="profile-edit-form" onSubmit={requestPasswordConfirmation}>
+        <label className="form-field"><span>{tx('Nome completo')}</span><input value={fullName} onChange={event => setFullName(event.target.value)} autoComplete="name" minLength={3} maxLength={100} required /></label>
+        <label className="form-field"><span>{tx('Nome de usuário')}</span><div className="profile-username-input"><AtSign size={17} /><input value={username} onChange={event => setUsername(event.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, ''))} autoComplete="username" minLength={3} maxLength={24} required /></div><small>{tx('Você poderá usar esse nome para entrar. Use 3 a 24 caracteres, sem espaços.')}</small></label>
+        <label className="form-field"><span>{tx('Data de nascimento')}</span><input type="date" value={dateOfBirth} onChange={event => setDateOfBirth(event.target.value)} max={dateKey(new Date())} required /></label>
+        <label className="form-field"><span>{tx('E-mail da conta')}</span><input type="email" value={user?.email || ''} readOnly disabled /></label>
+        {error && <div className="profile-edit-error"><CircleAlert size={16} />{error}</div>}
+        <div className="profile-edit-actions"><span className="profile-settings-hint"><LockKeyhole size={14} />{tx('A senha é solicitada antes de salvar mudanças no perfil.')}</span><button type="submit" className="button button-primary" disabled={busy || avatarBusy || !changed}><Check size={16} />{tx('Salvar alterações')}</button></div>
+      </form>
+    </section>
+
+    {confirmOpen && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) { setConfirmOpen(false); setPasswordToConfirm(''); setPasswordError(''); } }}><section className="password-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="profile-password-title"><div className="modal-heading"><div className="modal-title-icon"><LockKeyhole size={21} /></div><div><span className="section-kicker">{tx('CONFIRMAÇÃO DE SEGURANÇA')}</span><h2 id="profile-password-title">{tx('Confirme sua senha')}</h2><p>{tx('Para proteger sua conta, digite sua senha atual antes de salvar as alterações do perfil.')}</p></div><button type="button" className="icon-button" onClick={() => { if (!busy) { setConfirmOpen(false); setPasswordToConfirm(''); setPasswordError(''); } }} aria-label={tx('Fechar')}><X size={19} /></button></div><form onSubmit={confirmAndSave} className="password-confirm-form"><label className="form-field"><span>{tx('Senha atual')}</span><input type="password" value={passwordToConfirm} onChange={event => setPasswordToConfirm(event.target.value)} autoComplete="current-password" required autoFocus /></label>{passwordError && <div className="profile-edit-error"><CircleAlert size={16} />{passwordError}</div>}<div className="password-confirm-actions"><button type="button" className="button button-secondary" disabled={busy} onClick={() => { setConfirmOpen(false); setPasswordToConfirm(''); setPasswordError(''); }}>{tx('Cancelar')}</button><button type="submit" className="button button-primary" disabled={busy || !passwordToConfirm}>{busy ? <RefreshCw size={16} className="auth-spinner" /> : <ShieldCheck size={16} />}{busy ? tx('Validando…') : tx('Confirmar e salvar')}</button></div></form></section></div>}
   </div>;
 }
 
